@@ -200,6 +200,21 @@ function ssFloorMask(key, availSF){
       cum+=rowCnt*cellSF;
       if(cum>=target){ cutRow=ry+1; break; }
     }
+    // Horizontal extent of the floor at the divider (line hugs the outline,
+    // no overhang): union of the interior extents of the rows just above
+    // and just below the line, padded one cell to reach the wall band.
+    var lx0=-1, lx1=-1;
+    [cutRow-1, cutRow].forEach(function(rr){
+      if(rr<0||rr>=H) return;
+      for(var xx=0;xx<W;xx++){
+        if(interior[rr*W+xx]){
+          if(lx0<0||xx<lx0) lx0=xx;
+          if(xx>lx1) lx1=xx;
+        }
+      }
+    });
+    if(lx0>=0){ lx0=Math.max(0,lx0-1); lx1=Math.min(W-1,lx1+1); }
+
     // grey out everything below the divider row
     var byRow={};
     for(var cy2=cutRow;cy2<H;cy2++){
@@ -218,7 +233,7 @@ function ssFloorMask(key, availSF){
         if(i2<row.length){ st=row[i2]; prev=row[i2]; }
       }
     });
-    divider={row:cutRow, runs:runs, availActual:Math.min(cum,target>0?cum:0)};
+    divider={row:cutRow, x0:lx0, x1:lx1, runs:runs, availActual:Math.min(cum,target>0?cum:0)};
   }
   var free=0;
   for(var j2=0;j2<W*H;j2++){ if(interior[j2]) free++; }
@@ -787,11 +802,11 @@ function buildBuildingPanel(container){
         });
         innerWorld.appendChild(cutSvg);
       }
-      if(dv.row<lvlMask.H&&fp){
+      if(dv.row<lvlMask.H&&fp&&dv.x0>=0){
         var lineY=foy+dv.row*cellPx;
         innerWorld.appendChild(el("div",{style:[
-          "position:absolute","left:"+fox+"px","top:"+(lineY-1)+"px",
-          "width:"+(fp.vb[2]*ssFtPerUnit()*SS_GRID_PX_PER_FT*lz)+"px","height:2px",
+          "position:absolute","left:"+(fox+dv.x0*cellPx)+"px","top:"+(lineY-1)+"px",
+          "width:"+((dv.x1-dv.x0+1)*cellPx)+"px","height:2px",
           "background:#233044","z-index:5","pointer-events:none"
         ].join(";")}));
       }
