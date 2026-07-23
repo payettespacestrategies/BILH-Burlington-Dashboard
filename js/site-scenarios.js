@@ -148,7 +148,45 @@ function ssClassGrid(key){
         else if(v>=225) cls[i]=0;       // white-ish (incl. faint dashed grid lines)
         else cls[i]=1;                  // wall lines / grey unusable area — blocked
       }
-      _ssClassCache[ck]={W:W,H:H,upc:upc,cls:cls};
+      // High-resolution usable-area clip mask (world px, 2 px/ft): same
+      // classification + pixel-level exterior flood. Placed regions are
+      // clipped against this so their edges follow the drawn walls
+      // exactly (diagonals stay diagonal — no 3-ft staircase).
+      var PW=Math.max(2,Math.round(fp.vb[2]*fpu*SS_GRID_PX_PER_FT));
+      var PH=Math.max(2,Math.round(fp.vb[3]*fpu*SS_GRID_PX_PER_FT));
+      var pcv=document.createElement("canvas"); pcv.width=PW; pcv.height=PH;
+      var pctx=pcv.getContext("2d",{willReadFrequently:true});
+      pctx.fillStyle="#fff"; pctx.fillRect(0,0,PW,PH);
+      pctx.drawImage(img,0,0,PW,PH);
+      var pd=pctx.getImageData(0,0,PW,PH);
+      var pdd=pd.data;
+      var pcls=new Uint8Array(PW*PH);   // 0 white · 1 blocked · 2 colored
+      for(var q=0;q<PW*PH;q++){
+        var pr=pdd[q*4],pg=pdd[q*4+1],pb=pdd[q*4+2];
+        var pv=Math.max(pr,pg,pb), ps=pv-Math.min(pr,pg,pb);
+        if(ps>28) pcls[q]=2;
+        else if(pv>=225) pcls[q]=0;
+        else pcls[q]=1;
+      }
+      var pext=new Uint8Array(PW*PH), pst=[];
+      for(var px2=0;px2<PW;px2++){ pst.push(px2,(PH-1)*PW+px2); }
+      for(var py2=0;py2<PH;py2++){ pst.push(py2*PW, py2*PW+PW-1); }
+      while(pst.length){
+        var pp3=pst.pop();
+        if(pext[pp3]||pcls[pp3]!==0) continue;
+        pext[pp3]=1;
+        var pcx=pp3%PW, pcy=(pp3-pcx)/PW;
+        if(pcx>0)pst.push(pp3-1); if(pcx<PW-1)pst.push(pp3+1);
+        if(pcy>0)pst.push(pp3-PW); if(pcy<PH-1)pst.push(pp3+PW);
+      }
+      // usable canvas: opaque where placeable (white-inside or colored)
+      for(var q2=0;q2<PW*PH;q2++){
+        var usable=(pcls[q2]===0&&!pext[q2])||pcls[q2]===2;
+        pdd[q2*4]=255; pdd[q2*4+1]=255; pdd[q2*4+2]=255;
+        pdd[q2*4+3]=usable?255:0;
+      }
+      pctx.putImageData(pd,0,0);
+      _ssClassCache[ck]={W:W,H:H,upc:upc,cls:cls,usableCanvas:pcv,PW:PW,PH:PH};
     }finally{
       URL.revokeObjectURL(url);
       delete _ssClassPending[ck];
@@ -936,30 +974,36 @@ function buildBuildingPanel(container){
       foy=(scaledCanvas-fp.vb[3]*pxPerU2)/2;
     }
 
+    // High-res usable clip mask + per-level "claimed" canvas (world px):
+    // regions are inflated then clipped against the drawn plan, so their
+    // edges follow the real walls smoothly instead of the 3-ft cell grid.
+    var cg=ssClassGrid(ssPlanKey(lvlDef.plan));
+    var usableCv=(cg&&cg.usableCanvas)?cg.usableCanvas:null;
+    var cellW=SS_MASK_FT*SS_GRID_PX_PER_FT;    // world px per mask cell
+    var RPAD=4;                                 // world-px inflation before clipping
+    var claimedCv=null,claimedCtx=null;
+    if(usableCv){
+      claimedCv=document.createElement("canvas"); claimedCv.width=cg.PW; claimedCv.height=cg.PH;
+      claimedCtx=claimedCv.getContext("2d");
+    }
+    var dividerWorldY=(lvlMask&&lvlMask.divider&&lvlMask.divider.row<lvlMask.H)?lvlMask.divider.row*cellW:null;
+
     // Available-Area divider (Stilts Level 3): grey out the area below the
     // computed line so only avail_sf of white area remains placeable above it.
     if(lvlMask&&lvlMask.divider){
       var dv=lvlMask.divider;
-      if(dv.runs.length){
-        var cutSvg=document.createElementNS(svgNS,"svg");
-        var cbb={x0:1e9,y0:1e9,x1:-1,y1:-1};
-        dv.runs.forEach(function(rn){
-          if(rn.x0<cbb.x0)cbb.x0=rn.x0; if(rn.x1+1>cbb.x1)cbb.x1=rn.x1+1;
-          if(rn.y<cbb.y0)cbb.y0=rn.y;   if(rn.y+1>cbb.y1)cbb.y1=rn.y+1;
-        });
-        cutSvg.setAttribute("viewBox",cbb.x0+" "+cbb.y0+" "+(cbb.x1-cbb.x0)+" "+(cbb.y1-cbb.y0));
-        cutSvg.setAttribute("width",(cbb.x1-cbb.x0)*cellPx);
-        cutSvg.setAttribute("height",(cbb.y1-cbb.y0)*cellPx);
-        cutSvg.setAttribute("preserveAspectRatio","none");
-        cutSvg.style.cssText="position:absolute;left:"+(fox+cbb.x0*cellPx)+"px;top:"+(foy+cbb.y0*cellPx)+"px;pointer-events:none;z-index:1";
-        dv.runs.forEach(function(rn){
-          var rc=document.createElementNS(svgNS,"rect");
-          rc.setAttribute("x",rn.x0);rc.setAttribute("y",rn.y);
-          rc.setAttribute("width",rn.x1-rn.x0+1);rc.setAttribute("height",1.03);
-          rc.setAttribute("fill","#d2d0cf");rc.setAttribute("fill-opacity","0.85");
-          cutSvg.appendChild(rc);
-        });
-        innerWorld.appendChild(cutSvg);
+      if(dv.row<lvlMask.H&&usableCv){
+        var gcv=document.createElement("canvas"); gcv.width=cg.PW; gcv.height=cg.PH;
+        var g2=gcv.getContext("2d");
+        g2.fillStyle="#000";
+        g2.fillRect(0, dv.row*cellW, cg.PW, cg.PH-dv.row*cellW);
+        g2.globalCompositeOperation="destination-in";
+        g2.drawImage(usableCv,0,0);
+        g2.globalCompositeOperation="source-in";
+        g2.fillStyle="#d2d0cf";
+        g2.fillRect(0,0,cg.PW,cg.PH);
+        gcv.style.cssText="position:absolute;left:"+fox+"px;top:"+foy+"px;width:"+(cg.PW*lz)+"px;height:"+(cg.PH*lz)+"px;pointer-events:none;z-index:1;opacity:0.85";
+        innerWorld.appendChild(gcv);
       }
       if(dv.row<lvlMask.H&&fp&&dv.x0>=0){
         var lineY=foy+dv.row*cellPx;
@@ -995,10 +1039,41 @@ function buildBuildingPanel(container){
       }
       var cat=ssCat(item.catId);
       var color=cat?cat.color:"#C2C3C8";
-      var bw=(f.bbox.x1-f.bbox.x0)*cellPx, bh=(f.bbox.y1-f.bbox.y0)*cellPx;
-      var bx=fox+f.bbox.x0*cellPx, by=foy+f.bbox.y0*cellPx;
-
       var isPartial=f.portionGSF < f.gsf-40;
+
+      // Region raster (world px): inflate the cells, clip to the drawn plan,
+      // subtract earlier blocks + the Available-Area cut, then colorize —
+      // edges end up following the real walls, not the cell grid.
+      var wx0=Math.max(0,Math.floor(f.bbox.x0*cellW-RPAD));
+      var wy0=Math.max(0,Math.floor(f.bbox.y0*cellW-RPAD));
+      var wx1=f.bbox.x1*cellW+RPAD, wy1=f.bbox.y1*cellW+RPAD;
+      if(usableCv){ wx1=Math.min(cg.PW,wx1); wy1=Math.min(cg.PH,wy1); }
+      var ww=Math.max(2,Math.ceil(wx1-wx0)), wh=Math.max(2,Math.ceil(wy1-wy0));
+      var rcv=document.createElement("canvas"); rcv.width=ww; rcv.height=wh;
+      var rctx=rcv.getContext("2d");
+      rctx.fillStyle="#000";
+      f.runs.forEach(function(rn){
+        rctx.fillRect(rn.x0*cellW-RPAD-wx0, rn.y*cellW-RPAD-wy0,
+                      (rn.x1-rn.x0+1)*cellW+2*RPAD, cellW+2*RPAD);
+      });
+      if(usableCv){
+        rctx.globalCompositeOperation="destination-in";
+        rctx.drawImage(usableCv,-wx0,-wy0);
+        rctx.globalCompositeOperation="destination-out";
+        rctx.drawImage(claimedCv,-wx0,-wy0);
+        if(dividerWorldY!==null){
+          rctx.fillStyle="#000";
+          rctx.fillRect(0, dividerWorldY-wy0, ww, wh);
+        }
+        claimedCtx.drawImage(rcv, wx0, wy0);
+      }
+      rctx.globalCompositeOperation="source-in";
+      rctx.fillStyle=color;
+      rctx.fillRect(0,0,ww,wh);
+
+      var bx=fox+wx0*lz, by=foy+wy0*lz;
+      var bw=ww*lz, bh=wh*lz;
+
       var rEl=el("div",{
         title:(cat?cat.name:item.catId)+" × "+item.factor+
           (isPartial?" | part: "+fmt(f.portionGSF)+" of "+fmt(f.gsf)+" GSF"+(f.truncated?" — floor full, remainder stays in the Program panel":""):" | "+fmt(f.gsf)+" GSF"),
@@ -1009,36 +1084,13 @@ function buildBuildingPanel(container){
           "overflow:visible"
         ].join(";")
       });
-
-      var svgNSr="http://www.w3.org/2000/svg";
-      var rsvg=document.createElementNS(svgNSr,"svg");
-      rsvg.setAttribute("viewBox",f.bbox.x0+" "+f.bbox.y0+" "+(f.bbox.x1-f.bbox.x0)+" "+(f.bbox.y1-f.bbox.y0));
-      rsvg.setAttribute("width",bw); rsvg.setAttribute("height",bh);
-      rsvg.setAttribute("preserveAspectRatio","none");
-      rsvg.style.cssText="display:block;pointer-events:none;overflow:visible";
-      f.runs.forEach(function(rn){
-        var rc=document.createElementNS(svgNSr,"rect");
-        rc.setAttribute("x",rn.x0);rc.setAttribute("y",rn.y);
-        rc.setAttribute("width",rn.x1-rn.x0+1);rc.setAttribute("height",1.03);
-        rc.setAttribute("fill",color);rc.setAttribute("fill-opacity","0.82");
-        rsvg.appendChild(rc);
-      });
-      if(f.edges&&f.edges.length){
-        var dstr="";
-        f.edges.forEach(function(e2){ dstr+="M"+e2[0]+" "+e2[1]+"L"+e2[2]+" "+e2[3]; });
-        var per=document.createElementNS(svgNSr,"path");
-        per.setAttribute("d",dstr);
-        per.setAttribute("stroke",darkenColor(color,0.35));
-        per.setAttribute("stroke-width","0.16");
-        per.setAttribute("fill","none");
-        rsvg.appendChild(per);
-      }
-      rEl.appendChild(rsvg);
+      rcv.style.cssText="display:block;width:"+bw+"px;height:"+bh+"px;pointer-events:none;opacity:0.82";
+      rEl.appendChild(rcv);
 
       // Label at region centroid
       if(bw>=46&&bh>=16){
-        var lxPct=((f.centroid[0]-f.bbox.x0)/(f.bbox.x1-f.bbox.x0))*100;
-        var lyPct=((f.centroid[1]-f.bbox.y0)/(f.bbox.y1-f.bbox.y0))*100;
+        var lxPct=((f.centroid[0]*cellW-wx0)/ww)*100;
+        var lyPct=((f.centroid[1]*cellW-wy0)/wh)*100;
         rEl.appendChild(el("div",{style:"position:absolute;left:"+lxPct+"%;top:"+lyPct+"%;transform:translate(-50%,-50%);font-size:9px;font-weight:800;color:#233044;pointer-events:none;text-align:center;line-height:1.25;text-shadow:0 0 3px #fff,0 0 3px #fff,0 0 4px #fff;white-space:nowrap"},
           [(cat?cat.name:item.catId)+" ×"+item.factor+(isPartial?" (part)":""),
            el("br"),
