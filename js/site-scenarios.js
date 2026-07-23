@@ -46,6 +46,47 @@ var SS_SITE_META = {
   }
 };
 
+// ── Lease Timeline (67 South Bedford only — the only plan whose SVG has
+// colored lease zones baked in; other buildings' plans are grey/white only) ──
+var LEASE_TIMELINE_START = 2026, LEASE_TIMELINE_END = 2050;
+var LEASE_DEFS = [
+  {color:"#4e76ba", label:"Lease 1"},
+  {color:"#fbb35e", label:"Lease 2"},
+  {color:"#86b340", label:"Lease 3"}
+];
+var LEASE_BUILDING_IDS = ["sb67"];
+var LEASE_RGB = LEASE_DEFS.map(function(l){
+  var h=l.color;
+  return [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+});
+// Nearest-hex match — the plan SVGs only ever use these 3 exact colors for
+// lease zones, so this just absorbs anti-aliasing at region boundaries.
+function ssNearestLeaseIdx(r,g,b){
+  var best=0,bd=1e9;
+  for(var i=0;i<LEASE_RGB.length;i++){
+    var c=LEASE_RGB[i];
+    var d=(r-c[0])*(r-c[0])+(g-c[1])*(g-c[1])+(b-c[2])*(b-c[2]);
+    if(d<bd){bd=d;best=i;}
+  }
+  return best;
+}
+function ssHasLeases(bldgId){ return LEASE_BUILDING_IDS.indexOf(bldgId)>=0; }
+function ssDefaultLeases(){
+  return [{start:2026,end:2029},{start:2026,end:2030},{start:2026,end:2031}];
+}
+// Which leases are still active (blocking their floor area) at the
+// scenario's current year — a lease stops blocking once currentYear reaches
+// its end date.
+function ssLeaseActiveBits(bs){
+  var sc=ssScenario();
+  var cy=(sc.currentYear!==undefined)?sc.currentYear:LEASE_TIMELINE_START;
+  return LEASE_DEFS.map(function(_,i){
+    var l=bs.leases&&bs.leases[i];
+    return l ? (cy < l.end) : false;
+  });
+}
+function ssLeaseKey(bits){ return (bits||[]).map(function(b){return b?"1":"0";}).join(""); }
+
 // ── Small helpers ───────────────────────────────────────────────────────
 function f2(n){ return Number(n).toFixed(2); }
 function darkenColor(hex,amt){
@@ -110,9 +151,10 @@ function ssBlockStats(catId, factor){
 // outline and neighboring blocks, and can never fall outside the floor.
 // ====================================================================
 var SS_MASK_FT = 3;          // fill-grid cell size in feet (9 SF / cell)
-var _ssClassCache = {};      // key|fpu → {W,H,upc,cls} (0 white · 1 wall/grey blocked · 2 colored)
+var _ssClassCache = {};      // key|fpu → {W,H,upc,cls,PW,PH,pcls,pext} (0 white · 1 blocked · 2/3/4 lease1/2/3)
 var _ssClassPending = {};
-var _ssMaskCache = {};       // key|fpu|avail → mask
+var _ssMaskCache = {};       // key|fpu|avail|leaseBits → mask
+var _ssUsableCanvasCache = {}; // key|leaseBits → high-res usable-area clip canvas
 
 // Legacy plan-name mapping (old saved states); new plan names equal FLOOR_SVGS keys
 function ssPlanKey(plan){
@@ -144,14 +186,14 @@ function ssClassGrid(key){
       for(var i=0;i<W*H;i++){
         var r=d[i*4],g=d[i*4+1],b=d[i*4+2];
         var v=Math.max(r,g,b), sat=v-Math.min(r,g,b);
-        if(sat>28) cls[i]=2;            // colored — placeable
+        if(sat>28) cls[i]=2+ssNearestLeaseIdx(r,g,b);  // colored — a lease zone (2/3/4 = lease 1/2/3)
         else if(v>=225) cls[i]=0;       // white-ish (incl. faint dashed grid lines)
         else cls[i]=1;                  // wall lines / grey unusable area — blocked
       }
-      // High-resolution usable-area clip mask (world px, 2 px/ft): same
-      // classification + pixel-level exterior flood. Placed regions are
-      // clipped against this so their edges follow the drawn walls
-      // exactly (diagonals stay diagonal — no 3-ft staircase).
+      // High-resolution classification (world px, 2 px/ft): same rule, kept
+      // pixel-precise so placed regions can be clipped against the real
+      // drawn walls (diagonals stay diagonal — no 3-ft staircase) and so
+      // lease zones can be shown/hidden per lease state without re-rasterizing.
       var PW=Math.max(2,Math.round(fp.vb[2]*fpu*SS_GRID_PX_PER_FT));
       var PH=Math.max(2,Math.round(fp.vb[3]*fpu*SS_GRID_PX_PER_FT));
       var pcv=document.createElement("canvas"); pcv.width=PW; pcv.height=PH;
@@ -160,14 +202,17 @@ function ssClassGrid(key){
       pctx.drawImage(img,0,0,PW,PH);
       var pd=pctx.getImageData(0,0,PW,PH);
       var pdd=pd.data;
-      var pcls=new Uint8Array(PW*PH);   // 0 white · 1 blocked · 2 colored
+      var pcls=new Uint8Array(PW*PH);   // 0 white · 1 blocked · 2/3/4 lease 1/2/3
       for(var q=0;q<PW*PH;q++){
         var pr=pdd[q*4],pg=pdd[q*4+1],pb=pdd[q*4+2];
         var pv=Math.max(pr,pg,pb), ps=pv-Math.min(pr,pg,pb);
-        if(ps>28) pcls[q]=2;
+        if(ps>28) pcls[q]=2+ssNearestLeaseIdx(pr,pg,pb);
         else if(pv>=225) pcls[q]=0;
         else pcls[q]=1;
       }
+      // Exterior flood (which white pixels are truly outside the building) —
+      // depends only on wall/lease linework, never on lease active/inactive
+      // state, so it's cached once and reused whenever leases change.
       var pext=new Uint8Array(PW*PH), pst=[];
       for(var px2=0;px2<PW;px2++){ pst.push(px2,(PH-1)*PW+px2); }
       for(var py2=0;py2<PH;py2++){ pst.push(py2*PW, py2*PW+PW-1); }
@@ -179,14 +224,7 @@ function ssClassGrid(key){
         if(pcx>0)pst.push(pp3-1); if(pcx<PW-1)pst.push(pp3+1);
         if(pcy>0)pst.push(pp3-PW); if(pcy<PH-1)pst.push(pp3+PW);
       }
-      // usable canvas: opaque where placeable (white-inside or colored)
-      for(var q2=0;q2<PW*PH;q2++){
-        var usable=(pcls[q2]===0&&!pext[q2])||pcls[q2]===2;
-        pdd[q2*4]=255; pdd[q2*4+1]=255; pdd[q2*4+2]=255;
-        pdd[q2*4+3]=usable?255:0;
-      }
-      pctx.putImageData(pd,0,0);
-      _ssClassCache[ck]={W:W,H:H,upc:upc,cls:cls,usableCanvas:pcv,PW:PW,PH:PH};
+      _ssClassCache[ck]={W:W,H:H,upc:upc,cls:cls,PW:PW,PH:PH,pcls:pcls,pext:pext};
     }finally{
       URL.revokeObjectURL(url);
       delete _ssClassPending[ck];
@@ -203,13 +241,67 @@ function ssClassGrid(key){
   return null;
 }
 
+// High-res usable-area clip canvas for the CURRENT lease state: white-inside
+// pixels are always usable; a lease-colored pixel is usable only once that
+// lease has ended. Cheap to regenerate (no flood-fill — pext is precomputed
+// and lease-independent), so it's recomputed whenever lease state changes
+// and cached per (key, leaseBits) combination.
+function ssUsableCanvasFor(key, leaseBits){
+  var cg=ssClassGrid(key);
+  if(!cg) return null;
+  var lk=key+"|"+ssLeaseKey(leaseBits);
+  if(_ssUsableCanvasCache[lk]) return _ssUsableCanvasCache[lk];
+  var PW=cg.PW,PH=cg.PH, pcls=cg.pcls, pext=cg.pext;
+  var cv=document.createElement("canvas"); cv.width=PW; cv.height=PH;
+  var ctx=cv.getContext("2d");
+  var id=ctx.createImageData(PW,PH);
+  var dd=id.data;
+  for(var i=0;i<PW*PH;i++){
+    var c=pcls[i];
+    var usable=(c===0&&!pext[i])||(c>=2&&!leaseBits[c-2]);
+    dd[i*4]=255; dd[i*4+1]=255; dd[i*4+2]=255; dd[i*4+3]=usable?255:0;
+  }
+  ctx.putImageData(id,0,0);
+  _ssUsableCanvasCache[lk]=cv;
+  return cv;
+}
+
+// Visual overlay for the lease timeline: paints solid white over any lease
+// zone whose lease has already ended (so the plan itself goes "blank" there,
+// per spec), leaving still-active lease zones showing their original color.
+var _ssLeaseOverlayCache = {};
+function ssLeaseOverlayCanvasFor(key, leaseBits){
+  var cg=ssClassGrid(key);
+  if(!cg) return null;
+  var lk=key+"|"+ssLeaseKey(leaseBits);
+  if(_ssLeaseOverlayCache[lk]) return _ssLeaseOverlayCache[lk];
+  var PW=cg.PW,PH=cg.PH,pcls=cg.pcls;
+  var cv=document.createElement("canvas"); cv.width=PW; cv.height=PH;
+  var ctx=cv.getContext("2d");
+  var id=ctx.createImageData(PW,PH);
+  var dd=id.data;
+  var any=false;
+  for(var i=0;i<PW*PH;i++){
+    var c=pcls[i];
+    if(c>=2 && !leaseBits[c-2]){ dd[i*4]=255;dd[i*4+1]=255;dd[i*4+2]=255;dd[i*4+3]=255; any=true; }
+  }
+  ctx.putImageData(id,0,0);
+  var entry={cv:cv, any:any};
+  _ssLeaseOverlayCache[lk]=entry;
+  return entry;
+}
+
 // Mask for one level. If availSF is given (Stilts Level 3), only the TOP
 // availSF of placeable area stays usable — the rest is cut off below an
 // auto-computed horizontal divider line (returned in mask.divider).
-function ssFloorMask(key, availSF){
+// leaseBits: array of booleans, one per LEASE_DEFS entry — true = that
+// lease is still active (its colored zone is blocked); only relevant for
+// buildings whose plan actually contains lease-colored zones.
+function ssFloorMask(key, availSF, leaseBits){
+  leaseBits=leaseBits||[];
   var fpu=ssFtPerUnit();
   var hasAvail=(availSF!==undefined&&availSF!==null);
-  var ck=key+"|"+fpu.toFixed(5)+"|"+(hasAvail?Math.round(availSF):"-");
+  var ck=key+"|"+fpu.toFixed(5)+"|"+(hasAvail?Math.round(availSF):"-")+"|"+ssLeaseKey(leaseBits);
   if(_ssMaskCache[ck]) return _ssMaskCache[ck];
   var cg=ssClassGrid(key);
   if(!cg) return null;
@@ -228,7 +320,11 @@ function ssFloorMask(key, availSF){
     if(cy>0)stack.push(p-W); if(cy<H-1)stack.push(p+W);
   }
   var interior=new Uint8Array(W*H);
-  for(var j=0;j<W*H;j++){ if((cls[j]===0&&!ext[j])||cls[j]===2) interior[j]=1; }
+  for(var j=0;j<W*H;j++){
+    var cv2=cls[j];
+    if(cv2===0 && !ext[j]) interior[j]=1;
+    else if(cv2>=2 && !leaseBits[cv2-2]) interior[j]=1;   // lease zone, lease ended
+  }
 
   // Recover the wall / grey-edge halo: blocked cells that touch placeable
   // area (and are NOT on the sealed exterior face) become placeable, so
@@ -454,40 +550,63 @@ function ssFillOne(mask, key, taken, item, needCells){
   };
 }
 
+// Computes fills for every building/level, then evicts any placement that
+// ended up with zero cells despite still wanting area (e.g. a lease
+// reactivated over it, or its Available-Area was cut) — that portion's GSF
+// automatically returns to the block's unplaced pool. Bounded to a few
+// passes: an eviction only ever frees space, so it converges quickly.
 function ssComputeAllFills(){
   var sc=ssScenario();
   if(SS._fillsCache && SS._fillsCache.rev===SS._rev && SS._fillsCache.scen===SS.activeScenario) return SS._fillsCache;
-  var byLevel={}, consumed={};
-  sc.buildings.forEach(function(bs,bi){
-    var bdef=S.buildings[bi]; if(!bdef) return;
-    bdef.floors.forEach(function(lvlDef,li){
-      var key=ssPlanKey(lvlDef.plan);
-      var mask=ssFloorMask(key, lvlDef.avail_sf);
-      var items=bs.levels[li]||[];
-      var fills=[];
-      var taken=mask?new Uint8Array(mask.W*mask.H):null;
-      items.forEach(function(item){
-        var blockGSF=ssBlockGSF(item.catId,item.factor);
-        var remaining=Math.max(0, blockGSF-(consumed[item.id]||0));
-        if(!mask){
-          fills.push({item:item,cells:[],runs:[],edges:[],bbox:null,centroid:null,
-            gsf:blockGSF,portionGSF:0,fitGSF:0,wantedGSF:remaining,truncated:remaining>0});
-          return;
-        }
-        var needCells=Math.round(remaining/mask.cellSF);
-        var f=ssFillOne(mask, key, taken, item, needCells);
-        f.gsf=blockGSF;
-        f.portionGSF=f.cells.length*mask.cellSF;
-        f.fitGSF=f.portionGSF;
-        f.wantedGSF=remaining;
-        f.truncated=f.cells.length<needCells;
-        consumed[item.id]=(consumed[item.id]||0)+f.portionGSF;
-        fills.push(f);
+
+  var result=null;
+  for(var pass=0; pass<3 && !result; pass++){
+    var byLevel={}, consumed={}, evictions=[];
+    sc.buildings.forEach(function(bs,bi){
+      var bdef=S.buildings[bi]; if(!bdef) return;
+      var leaseBits=ssLeaseActiveBits(bs);
+      bdef.floors.forEach(function(lvlDef,li){
+        var key=ssPlanKey(lvlDef.plan);
+        var mask=ssFloorMask(key, lvlDef.avail_sf, leaseBits);
+        var items=bs.levels[li]||[];
+        var fills=[];
+        var taken=mask?new Uint8Array(mask.W*mask.H):null;
+        items.forEach(function(item, idx){
+          var blockGSF=ssBlockGSF(item.catId,item.factor);
+          var remaining=Math.max(0, blockGSF-(consumed[item.id]||0));
+          if(!mask){
+            fills.push({item:item,cells:[],runs:[],edges:[],bbox:null,centroid:null,
+              gsf:blockGSF,portionGSF:0,fitGSF:0,wantedGSF:remaining,truncated:remaining>0});
+            return;
+          }
+          var needCells=Math.round(remaining/mask.cellSF);
+          var f=ssFillOne(mask, key, taken, item, needCells);
+          f.gsf=blockGSF;
+          f.portionGSF=f.cells.length*mask.cellSF;
+          f.fitGSF=f.portionGSF;
+          f.wantedGSF=remaining;
+          f.truncated=f.cells.length<needCells;
+          consumed[item.id]=(consumed[item.id]||0)+f.portionGSF;
+          fills.push(f);
+          if(!f.bbox && f.wantedGSF>0) evictions.push({bi:bi, li:li, idx:idx});
+        });
+        byLevel[bi+":"+li]=fills;
       });
-      byLevel[bi+":"+li]=fills;
     });
-  });
-  SS._fillsCache={rev:SS._rev, scen:SS.activeScenario, byLevel:byLevel, consumed:consumed};
+    if(!evictions.length){
+      result={rev:SS._rev, scen:SS.activeScenario, byLevel:byLevel, consumed:consumed};
+      break;
+    }
+    var byLL={};
+    evictions.forEach(function(e){ (byLL[e.bi+":"+e.li]=byLL[e.bi+":"+e.li]||[]).push(e.idx); });
+    Object.keys(byLL).forEach(function(k){
+      var parts=k.split(":"), bi2=+parts[0], li2=+parts[1];
+      var idxs=byLL[k].sort(function(a,b){return b-a;});
+      var arr=sc.buildings[bi2].levels[li2];
+      idxs.forEach(function(ix){ arr.splice(ix,1); });
+    });
+  }
+  SS._fillsCache=result || {rev:SS._rev, scen:SS.activeScenario, byLevel:{}, consumed:{}};
   return SS._fillsCache;
 }
 function ssBlockConsumed(blockId){ return ssComputeAllFills().consumed[blockId]||0; }
@@ -541,9 +660,11 @@ function ssNewScenario(name){
         levelZoom:   b.floors.map(function(){ return ssFitZoom(b); }),
         levelPan:    b.floors.map(function(){ return [0,0]; }),
         levelHeights:b.floors.map(function(f,i){ return i*14; }),
-        sectionLine: null
+        sectionLine: null,
+        leases: ssHasLeases(b.id) ? ssDefaultLeases() : undefined
       };
     }),
+    currentYear: LEASE_TIMELINE_START,
     blocks: ssDefaultBlocks()
   };
 }
@@ -559,6 +680,8 @@ var SS = {
 
 function ssNormalizeScenario(sc){
   if(!Array.isArray(sc.blocks)||!sc.blocks.length) sc.blocks=ssDefaultBlocks();
+  if(sc.currentYear===undefined) sc.currentYear=LEASE_TIMELINE_START;
+  sc.currentYear=Math.max(LEASE_TIMELINE_START,Math.min(LEASE_TIMELINE_END,sc.currentYear));
   var byId={};
   (sc.buildings||[]).forEach(function(bs){ byId[bs.id]=bs; });
   sc.buildings=S.buildings.map(function(b){
@@ -569,6 +692,7 @@ function ssNormalizeScenario(sc){
     bs.levelPan    =(bs.levelPan||[]).slice(0,n);    while(bs.levelPan.length<n)    bs.levelPan.push([0,0]);
     bs.levelHeights=(bs.levelHeights||[]).slice(0,n);while(bs.levelHeights.length<n)bs.levelHeights.push(bs.levelHeights.length*14);
     if(bs.sectionLine===undefined) bs.sectionLine=null;
+    if(ssHasLeases(b.id) && !bs.leases) bs.leases=ssDefaultLeases();
     bs.levels.forEach(function(lvl){ lvl.forEach(function(it){ if(!it.pid) it.pid=it.id+"~m"+(SS._pidSeq++); }); });
     return bs;
   });
@@ -835,10 +959,13 @@ function buildBlocksPanel(container){
     allTotal+=g; allPlaced+=Math.min(g, ssBlockConsumed(b.id));
   });
   var cap=0, capReady=true;
-  S.buildings.forEach(function(b){ b.floors.forEach(function(f){
-    var m=ssFloorMask(ssPlanKey(f.plan), f.avail_sf);
-    if(m) cap+=m.freeCount*m.cellSF; else capReady=false;
-  }); });
+  S.buildings.forEach(function(b,bi){
+    var bLeaseBits=ssLeaseActiveBits(sc.buildings[bi]);
+    b.floors.forEach(function(f){
+      var m=ssFloorMask(ssPlanKey(f.plan), f.avail_sf, bLeaseBits);
+      if(m) cap+=m.freeCount*m.cellSF; else capReady=false;
+    });
+  });
   var sum=el("div",{style:"border-top:2px solid var(--ink);padding-top:8px;font-size:11px;color:var(--ink)"});
   sum.appendChild(el("div",{style:"display:flex;justify-content:space-between;font-weight:900"},[
     el("span",null,["All blocks"]), el("span",null,[fmt(allTotal)+" GSF"])]));
@@ -851,6 +978,141 @@ function buildBlocksPanel(container){
   container.appendChild(sum);
 
   container.scrollTop=_saved;
+}
+
+// ====================================================================
+// LEASE TIMELINE — 67 South Bedford only. Three colored lease zones are
+// baked into that building's plan SVGs; each lease bar's start/end year
+// (draggable) and the shared current-year marker (also draggable) decide
+// whether that zone is still blocked or has opened up for program. Changes
+// trigger a full rebuild, whose fill recompute (ssComputeAllFills) already
+// re-seeds displaced blocks nearby or evicts them back to the panel if
+// nothing fits anywhere on the floor.
+// ====================================================================
+function buildLeaseTimeline(container, bdef, bs, sc){
+  if(!ssHasLeases(bdef.id)) return;
+  if(!bs.leases) bs.leases=ssDefaultLeases();
+  if(sc.currentYear===undefined) sc.currentYear=LEASE_TIMELINE_START;
+
+  var wrap=el("div",{class:"box",style:"padding:10px 14px;margin-bottom:12px"});
+  var hdrRow=el("div",{style:"display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px"});
+  hdrRow.appendChild(el("h3",{style:"margin:0"},["Lease Timeline"]));
+  hdrRow.appendChild(el("span",{class:"hint",style:"margin:0"},
+    ["Drag a lease's edges to resize it, its middle to move it, or the flag to change the current year — a lease's floor area is blocked until it ends, then opens up for program."]));
+  wrap.appendChild(hdrRow);
+
+  var TL_W=Math.max(480, Math.min(900,(container.clientWidth||760)-44));
+  var TL_ROWH=25, TL_TOP=20, TL_H=TL_TOP+TL_ROWH*LEASE_DEFS.length+18;
+  var span=LEASE_TIMELINE_END-LEASE_TIMELINE_START;
+  function yx(yr){ return (yr-LEASE_TIMELINE_START)/span*TL_W; }
+
+  var tlOuter=el("div",{style:"overflow-x:auto"});
+  var tl=el("div",{style:"position:relative;width:"+TL_W+"px;height:"+TL_H+"px;user-select:none"});
+
+  // Year gridlines every 2 years, labeled every 4
+  for(var yr=LEASE_TIMELINE_START; yr<=LEASE_TIMELINE_END; yr+=2){
+    var gx=yx(yr);
+    tl.appendChild(el("div",{style:"position:absolute;left:"+gx+"px;top:"+TL_TOP+"px;bottom:14px;width:1px;background:var(--line)"}));
+    if((yr-LEASE_TIMELINE_START)%4===0){
+      tl.appendChild(el("div",{style:"position:absolute;left:"+gx+"px;bottom:0;transform:translateX("+(yr===LEASE_TIMELINE_START?"0":(yr===LEASE_TIMELINE_END?"-100%":"-50%"))+");font-size:9px;color:var(--faint)"},[String(yr)]));
+    }
+  }
+
+  function rebuildAfterDrag(){
+    ssTouch();
+    var pp=document.getElementById("ss-prog-panel");if(pp)buildBlocksPanel(pp);
+    buildBuildingPanel(container);
+    var sp=document.getElementById("ss-site-panel");if(sp)buildSitePanel(sp);
+  }
+
+  // Lease bars
+  bs.leases.forEach(function(lease, li){
+    var def=LEASE_DEFS[li];
+    var rowY=TL_TOP+li*TL_ROWH;
+    var label=el("div",{style:"flex:1;min-width:0;padding:0 6px;font-size:9px;font-weight:800;color:#fff;text-shadow:0 1px 1px rgba(0,0,0,.4);white-space:nowrap;overflow:hidden;pointer-events:none"},
+      [def.label+" · "+lease.start+"–"+lease.end]);
+    var bar=el("div",{
+      title:def.label+": "+lease.start+"–"+lease.end+" (drag edges to resize, middle to move)",
+      style:[
+        "position:absolute","left:"+yx(lease.start)+"px","top:"+rowY+"px",
+        "width:"+Math.max(6,yx(lease.end)-yx(lease.start))+"px","height:"+(TL_ROWH-6)+"px",
+        "background:"+def.color,"border:1px solid "+darkenColor(def.color,0.3),
+        "cursor:grab","box-sizing:border-box","display:flex","align-items:center"
+      ].join(";")
+    },[label]);
+    var lh=el("div",{style:"position:absolute;left:-3px;top:0;bottom:0;width:7px;cursor:ew-resize"});
+    var rh=el("div",{style:"position:absolute;right:-3px;top:0;bottom:0;width:7px;cursor:ew-resize"});
+    bar.appendChild(lh); bar.appendChild(rh);
+
+    function commit(){
+      bar.style.left=yx(lease.start)+"px";
+      bar.style.width=Math.max(6,yx(lease.end)-yx(lease.start))+"px";
+      bar.title=def.label+": "+lease.start+"–"+lease.end+" (drag edges to resize, middle to move)";
+      label.textContent=def.label+" · "+lease.start+"–"+lease.end;
+    }
+    function dragHandler(mode){
+      return function(e){
+        e.stopPropagation();e.preventDefault();
+        var startLease={start:lease.start,end:lease.end};
+        var startX=e.clientX;
+        function onMove(ev){
+          var dxYears=Math.round(((ev.clientX-startX)/TL_W)*span);
+          if(mode==="move"){
+            var dur=startLease.end-startLease.start;
+            var ns=Math.max(LEASE_TIMELINE_START,Math.min(LEASE_TIMELINE_END-dur, startLease.start+dxYears));
+            lease.start=ns; lease.end=ns+dur;
+          } else if(mode==="left"){
+            lease.start=Math.max(LEASE_TIMELINE_START, Math.min(lease.end-1, startLease.start+dxYears));
+          } else {
+            lease.end=Math.min(LEASE_TIMELINE_END, Math.max(lease.start+1, startLease.end+dxYears));
+          }
+          commit();
+        }
+        function onUp(){
+          document.removeEventListener("mousemove",onMove);
+          document.removeEventListener("mouseup",onUp);
+          rebuildAfterDrag();
+        }
+        document.addEventListener("mousemove",onMove);
+        document.addEventListener("mouseup",onUp);
+      };
+    }
+    bar.addEventListener("mousedown",dragHandler("move"));
+    lh.addEventListener("mousedown",dragHandler("left"));
+    rh.addEventListener("mousedown",dragHandler("right"));
+    tl.appendChild(bar);
+  });
+
+  // Current-year marker (shared "now" line + draggable flag)
+  var cyx=yx(sc.currentYear);
+  var curLine=el("div",{style:"position:absolute;left:"+cyx+"px;top:"+TL_TOP+"px;bottom:14px;width:2px;background:#233044;z-index:5;pointer-events:none"});
+  var curFlag=el("div",{
+    title:"Drag to set the current year",
+    style:"position:absolute;left:"+cyx+"px;top:0;transform:translateX(-50%);background:#233044;color:#fff;font-size:10px;font-weight:800;padding:1px 6px;border-radius:3px;cursor:ew-resize;white-space:nowrap;z-index:6"
+  },[String(sc.currentYear)]);
+  curFlag.addEventListener("mousedown",function(e){
+    e.stopPropagation();e.preventDefault();
+    var startX=e.clientX, startYear=sc.currentYear;
+    function onMove(ev){
+      var dxYears=Math.round(((ev.clientX-startX)/TL_W)*span);
+      sc.currentYear=Math.max(LEASE_TIMELINE_START,Math.min(LEASE_TIMELINE_END,startYear+dxYears));
+      var nx=yx(sc.currentYear);
+      curLine.style.left=nx+"px"; curFlag.style.left=nx+"px"; curFlag.textContent=String(sc.currentYear);
+    }
+    function onUp(){
+      document.removeEventListener("mousemove",onMove);
+      document.removeEventListener("mouseup",onUp);
+      rebuildAfterDrag();
+    }
+    document.addEventListener("mousemove",onMove);
+    document.addEventListener("mouseup",onUp);
+  });
+  tl.appendChild(curLine);
+  tl.appendChild(curFlag);
+
+  tlOuter.appendChild(tl);
+  wrap.appendChild(tlOuter);
+  container.appendChild(wrap);
 }
 
 // ====================================================================
@@ -900,6 +1162,7 @@ function buildBuildingPanel(container){
     },["✕ Clear"]));
   }
   container.appendChild(legendRow);
+  buildLeaseTimeline(container, bdef, bs, sc);
 
   var worldPx0=gridFt*SS_GRID_PX_PER_FT;   // world px at zoom=1
 
@@ -963,7 +1226,8 @@ function buildBuildingPanel(container){
     }
 
     // Placed blocks — smart-filled regions that hug the floor outline
-    var lvlMask=ssFloorMask(ssPlanKey(lvlDef.plan), lvlDef.avail_sf);
+    var leaseBits=ssLeaseActiveBits(bs);
+    var lvlMask=ssFloorMask(ssPlanKey(lvlDef.plan), lvlDef.avail_sf, leaseBits);
     var fills=ssComputeFills(bdef, bs, li);
     lvlGSF=fills.reduce(function(s,f){return s+f.portionGSF;},0);
     var cellPx=SS_MASK_FT*SS_GRID_PX_PER_FT*lz;   // display px per mask cell
@@ -978,7 +1242,7 @@ function buildBuildingPanel(container){
     // regions are inflated then clipped against the drawn plan, so their
     // edges follow the real walls smoothly instead of the 3-ft cell grid.
     var cg=ssClassGrid(ssPlanKey(lvlDef.plan));
-    var usableCv=(cg&&cg.usableCanvas)?cg.usableCanvas:null;
+    var usableCv=cg?ssUsableCanvasFor(ssPlanKey(lvlDef.plan), leaseBits):null;
     var cellW=SS_MASK_FT*SS_GRID_PX_PER_FT;    // world px per mask cell
     var RPAD=4;                                 // world-px inflation before clipping
     var claimedCv=null,claimedCtx=null;
@@ -987,6 +1251,19 @@ function buildBuildingPanel(container){
       claimedCtx=claimedCv.getContext("2d");
     }
     var dividerWorldY=(lvlMask&&lvlMask.divider&&lvlMask.divider.row<lvlMask.H)?lvlMask.divider.row*cellW:null;
+
+    // Lease visual overlay: an ended lease's colored zone is painted white
+    // (blank, per spec) so the plan itself reflects lease state — an
+    // active (not-yet-ended) lease stays its original color underneath,
+    // matching the fact that it's still occupied and can't take program.
+    if(ssHasLeases(bdef.id) && fp){
+      var loRes=ssLeaseOverlayCanvasFor(ssPlanKey(lvlDef.plan), leaseBits);
+      if(loRes && loRes.any){
+        var loCv=loRes.cv;
+        loCv.style.cssText="position:absolute;left:"+fox+"px;top:"+foy+"px;width:"+(loCv.width*lz)+"px;height:"+(loCv.height*lz)+"px;pointer-events:none;z-index:1;opacity:0.97";
+        innerWorld.appendChild(loCv);
+      }
+    }
 
     // Available-Area divider (Stilts Level 3): grey out the area below the
     // computed line so only avail_sf of white area remains placeable above it.
@@ -1256,7 +1533,7 @@ function buildBuildingPanel(container){
       var cRect=canvasWrap.getBoundingClientRect();
       var curPanX=bs.levelPan[li][0],curPanY=bs.levelPan[li][1];
 
-      var dropMask=ssFloorMask(ssPlanKey(lvlDef.plan), lvlDef.avail_sf);
+      var dropMask=ssFloorMask(ssPlanKey(lvlDef.plan), lvlDef.avail_sf, ssLeaseActiveBits(bs));
       if(!dropMask){ return; }
       if(dropMask.freeCount<=0){ alert("No usable (white / colored) area on "+lvlDef.label+" — grey area can't hold program."); return; }
       var seed=ssDropSeed(e, cRect, curPanX, curPanY, lz, ssPlanKey(lvlDef.plan), worldPx0);
@@ -1373,8 +1650,9 @@ function buildBuildingPanel(container){
   // Building total
   var bTot=ssPlacedGSFForBuilding(bdef.id);
   var bCap=0, capReady=true;
+  var bLeaseBits=ssLeaseActiveBits(bs);
   bdef.floors.forEach(function(f2){
-    var m2=ssFloorMask(ssPlanKey(f2.plan), f2.avail_sf);
+    var m2=ssFloorMask(ssPlanKey(f2.plan), f2.avail_sf, bLeaseBits);
     if(m2) bCap+=m2.freeCount*m2.cellSF; else capReady=false;
   });
   container.appendChild(el("div",{class:"hint",style:"margin-top:8px"},
