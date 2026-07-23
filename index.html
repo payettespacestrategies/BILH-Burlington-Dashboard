@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BILH Burlington Planning Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<div class="shell">
+
+<header>
+  <div>
+    <div class="brand">BILH Burlington Planning Dashboard</div>
+    <div class="sub" id="hdr-sub">Beth Israel Lahey Health · BIDMC Burlington Campus</div>
+  </div>
+  <div class="meta" style="margin-left:auto">
+    <div><b id="hdr-version"></b></div>
+    <div id="hdr-totals"></div>
+  </div>
+</header>
+
+<div class="tools">
+  <button onclick="exportGraphicProgramSVG()">⤓ Export Graphic SVG</button>
+  <button onclick="exportJSON()">⤓ Export JSON</button>
+  <label>⤒ Import JSON<input id="impf" type="file" accept=".json" style="display:none" onchange="importJSON(event)"></label>
+  <button onclick="exportXLSX()">⤓ Export Excel</button>
+  <button onclick="window.print()">🖨 Print / PDF</button>
+</div>
+
+<div class="tabs" id="tabs"></div>
+<div id="view"></div>
+
+<div class="footer" id="footer"></div>
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/site-svg.js"></script>
+<script src="js/floor-svgs.js"></script>
+<script src="js/app.js"></script>
+<script src="js/site-scenarios.js"></script>
+<script>render();</script>
+</body>
+</html>
