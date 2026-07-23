@@ -190,6 +190,45 @@ function ssFloorMask(key, availSF){
   }
   var interior=new Uint8Array(W*H);
   for(var j=0;j<W*H;j++){ if((cls[j]===0&&!ext[j])||cls[j]===2) interior[j]=1; }
+
+  // Recover the wall / grey-edge halo: blocked cells that touch placeable
+  // area (and are NOT on the sealed exterior face) become placeable, so
+  // fills hug the drawn linework instead of leaving a one-cell moat.
+  var rec=new Uint8Array(interior);
+  for(var hy=0;hy<H;hy++){
+    for(var hx=0;hx<W;hx++){
+      var hp=hy*W+hx;
+      if(interior[hp]||ext[hp]) continue;
+      var touchExt=(hx===0||ext[hp-1])||(hx===W-1||ext[hp+1])||(hy===0||ext[hp-W])||(hy===H-1||ext[hp+W]);
+      if(touchExt) continue;
+      var nInt=0;
+      if(hx>0&&interior[hp-1])nInt++;
+      if(hx<W-1&&interior[hp+1])nInt++;
+      if(hy>0&&interior[hp-W])nInt++;
+      if(hy<H-1&&interior[hp+W])nInt++;
+      if(nInt>=1) rec[hp]=1;
+    }
+  }
+  interior=rec;
+  // Despeckle: lone blocked cells (dashed-line crossings etc.) surrounded by
+  // placeable area become placeable — removes pinholes and edge notches.
+  for(var pass=0;pass<2;pass++){
+    var desp=new Uint8Array(interior);
+    for(var sy=0;sy<H;sy++){
+      for(var sx=0;sx<W;sx++){
+        var sp=sy*W+sx;
+        if(interior[sp]||ext[sp]) continue;
+        if((sx===0||ext[sp-1])||(sx===W-1||ext[sp+1])||(sy===0||ext[sp-W])||(sy===H-1||ext[sp+W])) continue;
+        var nI=0;
+        if(sx>0&&interior[sp-1])nI++;
+        if(sx<W-1&&interior[sp+1])nI++;
+        if(sy>0&&interior[sp-W])nI++;
+        if(sy<H-1&&interior[sp+W])nI++;
+        if(nI>=3) desp[sp]=1;
+      }
+    }
+    interior=desp;
+  }
   var divider=null;
   if(hasAvail){
     var target=Math.max(0,Number(availSF)||0);
@@ -323,7 +362,9 @@ function ssComputeFills(bdef, bs, li){
         inQ[n]=1;
         var nx=n%W, ny=(n-nx)/W;
         var dxx=Math.abs(nx-s0x), dyy=Math.abs(ny-s0y);
-        ssHeapPush(heap, Math.max(dxx,dyy)*1000+(dxx+dyy), n);
+        // Chebyshev rings; row-major within a ring so a partial final ring
+        // fills top-to-bottom and leaves one clean edge instead of jagged bumps
+        ssHeapPush(heap, Math.max(dxx,dyy)*1e7+(ny*W+nx), n);
       }
     }
     // Row RLE runs + bbox + centroid
@@ -562,29 +603,37 @@ function buildBlocksPanel(container){
       var asgn=ssAssignmentOf(block.id);
       var assigned=asgn!==null;
       var gsf=ssBlockGSF(block.catId, block.factor);
-      // Chip sized proportional to GSF (display scale)
-      var dw=Math.max(70,Math.round(Math.sqrt(Math.max(1,gsf)*SS_BLOCK_AR)*0.62));
-      var dh=Math.max(46,Math.round(Math.sqrt(Math.max(1,gsf)/SS_BLOCK_AR)*0.62));
+      // True-to-area swatch: on-screen area ∝ GSF (dims ∝ √GSF, no minimum
+      // clamp), so a ×0.3 block really reads as 30% of the ×1 block's area.
+      var SCALE=0.55;
+      var dw=Math.max(8,Math.round(Math.sqrt(Math.max(1,gsf)*SS_BLOCK_AR)*SCALE));
+      var dh=Math.max(6,Math.round(Math.sqrt(Math.max(1,gsf)/SS_BLOCK_AR)*SCALE));
 
-      var chip=el("div",{
+      var row=el("div",{
         "data-block-id":block.id,
         draggable:assigned?"false":"true",
         title:cat.name+" × "+block.factor+" — "+fmt(gsf)+" GSF"+(assigned?" (placed)":""),
         style:[
-          "position:relative","width:"+dw+"px","height:"+dh+"px",
-          "background:"+cat.color,
-          "border:1.5px solid "+darkenColor(cat.color,0.3),
+          "display:flex","align-items:center","gap:8px",
           "cursor:"+(assigned?"default":"grab"),
-          "opacity:"+(assigned?"0.4":"1"),
-          "padding:4px 6px","box-sizing:border-box","flex-shrink:0"
+          "opacity:"+(assigned?"0.45":"1"),
+          "padding:2px 0","user-select:none"
         ].join(";")
       });
-      var lblRow=el("div",{style:"display:flex;align-items:center;gap:4px"});
-      lblRow.appendChild(el("span",{style:"font-weight:900;font-size:12px;color:#233044"},["× "]));
+      row.appendChild(el("div",{style:[
+        "width:"+dw+"px","height:"+dh+"px","flex-shrink:0",
+        "background:"+cat.color,
+        "border:1.5px solid "+darkenColor(cat.color,0.3),
+        "box-sizing:border-box"
+      ].join(";")}));
+
+      var info=el("div",{style:"flex:1;min-width:0;display:flex;flex-direction:column;gap:1px"});
+      var lblRow=el("div",{style:"display:flex;align-items:center;gap:4px;flex-wrap:wrap"});
+      lblRow.appendChild(el("span",{style:"font-weight:900;font-size:12px;color:#233044"},["×"]));
       var fInp=el("input",{
         type:"text",value:String(block.factor),
         title:"Scale factor for this block",
-        style:"width:34px;font-size:12px;font-weight:900;border:1px solid rgba(35,48,68,.35);background:rgba(255,255,255,.8);padding:1px 3px;text-align:center;font-family:inherit;color:#233044"+(assigned?";pointer-events:none;opacity:.6":"")
+        style:"width:34px;font-size:12px;font-weight:900;border:1px solid rgba(35,48,68,.35);background:#fff;padding:1px 3px;text-align:center;font-family:inherit;color:#233044"+(assigned?";pointer-events:none;opacity:.6":"")
       });
       fInp.addEventListener("change",function(){
         var v=parseFloat(fInp.value.replace(/[^0-9.]/g,""));
@@ -593,18 +642,19 @@ function buildBlocksPanel(container){
       });
       fInp.addEventListener("mousedown",function(e){e.stopPropagation();});
       lblRow.appendChild(fInp);
-      lblRow.appendChild(el("span",{style:"font-size:10px;font-weight:700;color:#233044;margin-left:auto"},[fmt(gsf)+" GSF"]));
-      chip.appendChild(lblRow);
-      var stats=ssBlockStats(block.catId, block.factor);
-      if(stats) chip.appendChild(el("div",{style:"font-size:9px;color:#233044;opacity:.75;margin-top:2px;line-height:1.25"},[stats]));
-
+      lblRow.appendChild(el("span",{style:"font-size:11px;font-weight:800;color:#233044"},[fmt(gsf)+" GSF"]));
       if(assigned){
-        chip.appendChild(el("span",{style:"position:absolute;top:-8px;right:-6px;background:#233044;color:#fff;font-size:8px;font-weight:800;border-radius:5px;padding:0 5px;line-height:12px;pointer-events:none"},[ssBadgeFor(asgn)]));
-      } else {
-        // Remove instance
-        chip.appendChild(el("button",{
+        lblRow.appendChild(el("span",{style:"background:#233044;color:#fff;font-size:8px;font-weight:800;border-radius:5px;padding:0 5px;line-height:12px"},[ssBadgeFor(asgn)]));
+      }
+      info.appendChild(lblRow);
+      var stats=ssBlockStats(block.catId, block.factor);
+      if(stats) info.appendChild(el("div",{style:"font-size:9px;color:var(--mut);line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"},[stats]));
+      row.appendChild(info);
+
+      if(!assigned){
+        row.appendChild(el("button",{
           title:"Remove this block",
-          style:"position:absolute;top:-7px;right:-7px;width:15px;height:15px;border-radius:50%;border:1px solid #C0392B66;background:#fff;color:#C0392B;font-size:9px;cursor:pointer;line-height:1;padding:0",
+          style:"width:15px;height:15px;border-radius:50%;border:1px solid #C0392B66;background:#fff;color:#C0392B;font-size:9px;cursor:pointer;line-height:1;padding:0;flex-shrink:0",
           onclick:function(e){
             e.stopPropagation();
             var i=sc.blocks.indexOf(block);
@@ -612,14 +662,14 @@ function buildBlocksPanel(container){
             buildBlocksPanel(container);
           }
         },["✕"]));
-        chip.addEventListener("dragstart",function(e){
+        row.addEventListener("dragstart",function(e){
           e.dataTransfer.effectAllowed="move";
           e.dataTransfer.setData("text/plain",JSON.stringify({isBlock:true,id:block.id,catId:block.catId,factor:block.factor}));
-          setTimeout(function(){chip.style.opacity="0.25";},0);
+          setTimeout(function(){row.style.opacity="0.25";},0);
         });
-        chip.addEventListener("dragend",function(){chip.style.opacity="1";});
+        row.addEventListener("dragend",function(){row.style.opacity="1";});
       }
-      body.appendChild(chip);
+      body.appendChild(row);
     });
 
     // Category placement summary
