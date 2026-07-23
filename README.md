@@ -10,7 +10,7 @@ Interactive planning dashboard for the **Lahey Hospital and Medical Center** cam
 |---|---|
 | **Project Assumptions** | Measurement assumptions (plan scale, drawing units, rounding), DGSF→GSF building grossing per category, site overview axon, floor-plate GSF table for the three key buildings. |
 | **Program** | Three editable program categories — General Exam Clinic, Diagnostic & Treatment (KPU mode), Administrative Office — with key-variable drivers feeding computed throughput cards (visits, OR cases, imaging, headcount). |
-| **Site Scenarios** | The three program categories become scalable GSF **blocks**. Add block instances per category and scale each by a factor (×1, ×0.5, …) — e.g. an extra Admin block at half the office program. Drag blocks onto the floor levels of **Stilits · 31 Burlington Mall Road · 67 South Bedford St** (real floor outlines, per-level zoom/pan), with per-floor % full and overflow warnings, unplaced-program remainder, a drawable section cut (45° snap, per-level HT datums), the vector campus site plan with clickable building footprints, multiple scenarios, Buildings/Site PDF prints, and scenario JSON export/import. |
+| **Site Scenarios** | The three program categories become scalable GSF **blocks**. Add block instances per category and scale each by a factor (×1, ×0.5, …) — e.g. an extra Admin block at half the office program. Dropped blocks **auto-fill the usable floor area** (3-ft cells): they keep their GSF, hug the plan boundary and neighboring blocks, snap inside if dropped outside, and flag ⚠ truncation when a floor can't hold them. **Grey plan areas are unusable** (masked out); white and colored areas accept program. **Stilts Level 3** has an editable *Available Area* field (default 30,000 SF) — a horizontal divider line is auto-drawn so exactly that much white area remains above it, and it moves when the number changes. Plus per-floor % of usable area, unplaced-program remainder, a drawable section cut (45° snap, per-level HT datums), the vector campus site plan with clickable building footprints, multiple scenarios, Buildings/Site PDF prints, and scenario JSON export/import. |
 
 Top-bar **Export JSON / Import JSON** carries the full state including site scenarios; **Print / PDF** prints the current tab.
 
@@ -26,8 +26,9 @@ Block GSF = category NSF × departmental grossing (Program tab driver) × buildi
 index.html              full dashboard (v0.4 base + merged Site Scenarios): styles, state, Assumptions + Program tabs, 3D site axon
 js/site-scenarios.js    Site Scenarios tab (program blocks, building level canvases, section view, site map, prints)
 js/site-svg.js          inline campus site plan SVG (generated from assets/siteplan.svg)
-js/floor-svgs.js        inline floor outline SVGs for the three key buildings (generated, class-namespaced)
-assets/                 source SVG / JPG graphics (site plan, floor outlines, 3D site plan)
+js/floor-svgs.js        inline floor plan SVGs (generated from assets/floors-v2, class-namespaced)
+assets/floors-v2/       updated floor plans (2026-07-23): grey = unusable, white/colored = placeable
+assets/                 source SVG / JPG graphics (site plan, older outlines, 3D site plan)
 ```
 
 SVG assets are inlined as JS so the dashboard also works from `file://` (no fetch/CORS issues). Everything runs offline.

@@ -22,10 +22,10 @@ var SS_ZOOM=1.0, SS_PAN_X=0, SS_PAN_Y=0;
 // Floor plan svg lookup: S.buildings floor "plan" name → FLOOR_SVGS key
 var SS_PLAN_KEY = {
   "26_0722_Stilits_level1":"stilts_L1",
-  "26_0722_Stiilts_level2&3":"stilts_L2L3",
+  "26_0722_Stiilts_level2&3":"stilts_L2",
   "26_0722_Stilits_levels4-5-6":"stilts_L456",
   "31_BurlingtonMallRoad_level1&2":"mall31_L1L2",
-  "26_0722_67SouthBedford_level1&2":"sb67_L1L2",
+  "26_0722_67SouthBedford_level1&2":"sb67_L1",
   "26_0722_67SouthBedford_level3":"sb67_L3",
   "26_0722_67SouthBedford_level4":"sb67_L4"
 };
@@ -65,7 +65,7 @@ function ssPxPerFt(){ return SS_GRID_PX_PER_FT; }
 function ssGridFt(bldg){
   var mx=0;
   bldg.floors.forEach(function(f){
-    var fp=FLOOR_SVGS[SS_PLAN_KEY[f.plan]];
+    var fp=FLOOR_SVGS[ssPlanKey(f.plan)];
     if(fp) mx=Math.max(mx, fp.vb[2], fp.vb[3]);
   });
   var ft=mx*ssFtPerUnit();
@@ -110,66 +110,119 @@ function ssBlockStats(catId, factor){
 // outline and neighboring blocks, and can never fall outside the floor.
 // ====================================================================
 var SS_MASK_FT = 3;          // fill-grid cell size in feet (9 SF / cell)
-var _ssLineCache = {};
-var _ssMaskCache = {};
+var _ssClassCache = {};      // key|fpu → {W,H,upc,cls} (0 white · 1 wall/grey blocked · 2 colored)
+var _ssClassPending = {};
+var _ssMaskCache = {};       // key|fpu|avail → mask
 
-function ssFloorLines(key){
-  if(_ssLineCache[key]) return _ssLineCache[key];
-  var fp=FLOOR_SVGS[key]; if(!fp) return [];
-  var out=[];
-  var re=/<line[^>]*x1="([\d.-]+)"[^>]*y1="([\d.-]+)"[^>]*x2="([\d.-]+)"[^>]*y2="([\d.-]+)"/g, m;
-  while((m=re.exec(fp.svg))) out.push([+m[1],+m[2],+m[3],+m[4]]);
-  _ssLineCache[key]=out;
-  return out;
+// Legacy plan-name mapping (old saved states); new plan names equal FLOOR_SVGS keys
+function ssPlanKey(plan){
+  if(FLOOR_SVGS[plan]) return plan;
+  return SS_PLAN_KEY[plan]||plan;
 }
 
-function ssFloorMask(key){
+// Async: rasterize the floor plan svg (with its fills) and classify each cell.
+// Grey / dark → blocked · colored → placeable · white → placeable if inside.
+function ssClassGrid(key){
   var fpu=ssFtPerUnit();
   var ck=key+"|"+fpu.toFixed(5);
-  if(_ssMaskCache[ck]) return _ssMaskCache[ck];
+  if(_ssClassCache[ck]) return _ssClassCache[ck];
+  if(_ssClassPending[ck]) return null;
   var fp=FLOOR_SVGS[key]; if(!fp) return null;
-  var upc=SS_MASK_FT/fpu;                       // svg units per cell
+  _ssClassPending[ck]=true;
+  var upc=SS_MASK_FT/fpu;
   var W=Math.ceil(fp.vb[2]/upc), H=Math.ceil(fp.vb[3]/upc);
-  var cv=document.createElement("canvas"); cv.width=W; cv.height=H;
-  var ctx=cv.getContext("2d",{willReadFrequently:true});
-  ctx.fillStyle="#fff"; ctx.fillRect(0,0,W,H);
-  ctx.strokeStyle="#000"; ctx.lineWidth=1.1; ctx.lineCap="round";
-  ctx.beginPath();
-  ssFloorLines(key).forEach(function(s){
-    ctx.moveTo((s[0]-fp.vb[0])/upc,(s[1]-fp.vb[1])/upc);
-    ctx.lineTo((s[2]-fp.vb[0])/upc,(s[3]-fp.vb[1])/upc);
-  });
-  ctx.stroke();
-  var d=ctx.getImageData(0,0,W,H).data;
-  var wall=new Uint8Array(W*H);
-  for(var i=0;i<W*H;i++){ if(d[i*4]<235) wall[i]=1; }
-  // flood-fill the exterior from the borders
+  var img=new Image();
+  var url=URL.createObjectURL(new Blob([fp.svg],{type:"image/svg+xml"}));
+  img.onload=function(){
+    try{
+      var cv=document.createElement("canvas"); cv.width=W; cv.height=H;
+      var ctx=cv.getContext("2d",{willReadFrequently:true});
+      ctx.fillStyle="#fff"; ctx.fillRect(0,0,W,H);
+      ctx.drawImage(img,0,0,W,H);
+      var d=ctx.getImageData(0,0,W,H).data;
+      var cls=new Uint8Array(W*H);
+      for(var i=0;i<W*H;i++){
+        var r=d[i*4],g=d[i*4+1],b=d[i*4+2];
+        var v=Math.max(r,g,b), sat=v-Math.min(r,g,b);
+        if(sat>28) cls[i]=2;            // colored — placeable
+        else if(v>=225) cls[i]=0;       // white-ish (incl. faint dashed grid lines)
+        else cls[i]=1;                  // wall lines / grey unusable area — blocked
+      }
+      _ssClassCache[ck]={W:W,H:H,upc:upc,cls:cls};
+    }finally{
+      URL.revokeObjectURL(url);
+      delete _ssClassPending[ck];
+    }
+    if(state.tab==="scenarios"){
+      var bp=document.getElementById("ss-bldg-panel"); if(bp) buildBuildingPanel(bp);
+      var pp=document.getElementById("ss-prog-panel"); if(pp) buildBlocksPanel(pp);
+      var sp=document.getElementById("ss-site-panel"); if(sp) buildSitePanel(sp);
+    }
+  };
+  img.onerror=function(){ URL.revokeObjectURL(url); delete _ssClassPending[ck]; };
+  img.src=url;
+  return null;
+}
+
+// Mask for one level. If availSF is given (Stilts Level 3), only the TOP
+// availSF of placeable area stays usable — the rest is cut off below an
+// auto-computed horizontal divider line (returned in mask.divider).
+function ssFloorMask(key, availSF){
+  var fpu=ssFtPerUnit();
+  var hasAvail=(availSF!==undefined&&availSF!==null);
+  var ck=key+"|"+fpu.toFixed(5)+"|"+(hasAvail?Math.round(availSF):"-");
+  if(_ssMaskCache[ck]) return _ssMaskCache[ck];
+  var cg=ssClassGrid(key);
+  if(!cg) return null;
+  var W=cg.W,H=cg.H,cls=cg.cls;
+  var cellSF=SS_MASK_FT*SS_MASK_FT;
+  // exterior flood over white cells from the borders
   var ext=new Uint8Array(W*H), stack=[];
   for(var x=0;x<W;x++){ stack.push(x,(H-1)*W+x); }
   for(var y=0;y<H;y++){ stack.push(y*W, y*W+W-1); }
   while(stack.length){
     var p=stack.pop();
-    if(ext[p]||wall[p]) continue;
+    if(ext[p]||cls[p]!==0) continue;
     ext[p]=1;
     var cx=p%W, cy=(p-cx)/W;
     if(cx>0)stack.push(p-1); if(cx<W-1)stack.push(p+1);
     if(cy>0)stack.push(p-W); if(cy<H-1)stack.push(p+W);
   }
   var interior=new Uint8Array(W*H);
-  for(var j=0;j<W*H;j++){ if(!ext[j]&&!wall[j]) interior[j]=1; }
-  // Recover the inner half of the rasterized wall band: wall cells adjacent
-  // to interior become fillable (the outer boundary stays sealed by ext).
-  var grown=new Uint8Array(interior), free=0;
-  for(var gy=0;gy<H;gy++){
-    for(var gx=0;gx<W;gx++){
-      var gp=gy*W+gx;
-      if(wall[gp]&&!ext[gp]&&!interior[gp]){
-        if((gx>0&&interior[gp-1])||(gx<W-1&&interior[gp+1])||(gy>0&&interior[gp-W])||(gy<H-1&&interior[gp+W])) grown[gp]=1;
+  for(var j=0;j<W*H;j++){ if((cls[j]===0&&!ext[j])||cls[j]===2) interior[j]=1; }
+  var divider=null;
+  if(hasAvail){
+    var target=Math.max(0,Number(availSF)||0);
+    var cum=0, cutRow=H;
+    for(var ry=0;ry<H;ry++){
+      var rowCnt=0;
+      for(var rx=0;rx<W;rx++){ if(interior[ry*W+rx]) rowCnt++; }
+      cum+=rowCnt*cellSF;
+      if(cum>=target){ cutRow=ry+1; break; }
+    }
+    // grey out everything below the divider row
+    var byRow={};
+    for(var cy2=cutRow;cy2<H;cy2++){
+      for(var cx2=0;cx2<W;cx2++){
+        var p2=cy2*W+cx2;
+        if(interior[p2]){ interior[p2]=0; (byRow[cy2]=byRow[cy2]||[]).push(cx2); }
       }
     }
+    var runs=[];
+    Object.keys(byRow).forEach(function(rk){
+      var row=byRow[rk].sort(function(a,b){return a-b;});
+      var yy=+rk, st=row[0], prev=row[0];
+      for(var i2=1;i2<=row.length;i2++){
+        if(i2<row.length && row[i2]===prev+1){ prev=row[i2]; continue; }
+        runs.push({y:yy,x0:st,x1:prev});
+        if(i2<row.length){ st=row[i2]; prev=row[i2]; }
+      }
+    });
+    divider={row:cutRow, runs:runs, availActual:Math.min(cum,target>0?cum:0)};
   }
-  for(var j2=0;j2<W*H;j2++){ if(grown[j2]) free++; }
-  var mask={W:W,H:H,upc:upc,cellSF:SS_MASK_FT*SS_MASK_FT,interior:grown,freeCount:free};
+  var free=0;
+  for(var j2=0;j2<W*H;j2++){ if(interior[j2]) free++; }
+  var mask={W:W,H:H,upc:cg.upc,cellSF:cellSF,interior:interior,freeCount:free,divider:divider};
   _ssMaskCache[ck]=mask;
   return mask;
 }
@@ -218,8 +271,8 @@ function ssNearestFree(mask,taken,sx,sy){
 // Returns [{item, cells, runs, bbox, centroid, gsf, fitGSF, truncated}], in item order.
 function ssComputeFills(bdef, bs, li){
   var lvlDef=bdef.floors[li];
-  var key=SS_PLAN_KEY[lvlDef.plan];
-  var mask=ssFloorMask(key);
+  var key=ssPlanKey(lvlDef.plan);
+  var mask=ssFloorMask(key, lvlDef.avail_sf);
   var items=bs.levels[li]||[];
   var out=[];
   if(!mask){ items.forEach(function(it){ out.push({item:it,cells:[],runs:[],bbox:null,centroid:null,gsf:ssBlockGSF(it.catId,it.factor),fitGSF:0,truncated:true}); }); return out; }
@@ -399,6 +452,8 @@ function ssPlacedGSFForBuilding(bldgId){
 // ====================================================================
 function tabScenarios(){
   ssNormalizeScenario(ssScenario());
+  // kick off floor plan rasterization for every level (async, cached)
+  S.buildings.forEach(function(b){ b.floors.forEach(function(f){ ssClassGrid(ssPlanKey(f.plan)); }); });
   var outer=el("div",{style:"display:flex;flex-direction:column;gap:0"});
 
   // Top bar — scenario pills + exports
@@ -568,8 +623,11 @@ function buildBlocksPanel(container){
     var g=ssBlockGSF(b.catId,b.factor);
     allTotal+=g; if(ssIsAssigned(b.id)) allPlaced+=g;
   });
-  var cap=0;
-  S.buildings.forEach(function(b){ b.floors.forEach(function(f){ cap+=floorSF(f.units2); }); });
+  var cap=0, capReady=true;
+  S.buildings.forEach(function(b){ b.floors.forEach(function(f){
+    var m=ssFloorMask(ssPlanKey(f.plan), f.avail_sf);
+    if(m) cap+=m.freeCount*m.cellSF; else capReady=false;
+  }); });
   var sum=el("div",{style:"border-top:2px solid var(--ink);padding-top:8px;font-size:11px;color:var(--ink)"});
   sum.appendChild(el("div",{style:"display:flex;justify-content:space-between;font-weight:900"},[
     el("span",null,["All blocks"]), el("span",null,[fmt(allTotal)+" GSF"])]));
@@ -578,7 +636,7 @@ function buildBlocksPanel(container){
   sum.appendChild(el("div",{style:"display:flex;justify-content:space-between"},[
     el("span",null,["Unplaced remainder"]), el("span",{style:allTotal-allPlaced>0?"color:#C0392B;font-weight:700":""},[fmt(allTotal-allPlaced)+" GSF"])]));
   sum.appendChild(el("div",{style:"display:flex;justify-content:space-between;color:var(--faint);margin-top:2px"},[
-    el("span",null,["All-building floor plate capacity"]), el("span",null,[fmt(cap)+" GSF"])]));
+    el("span",null,["All-building usable area (grey excluded)"]), el("span",null,[capReady?fmt(cap)+" SF":"…"])]));
   container.appendChild(sum);
 
   container.scrollTop=_saved;
@@ -611,7 +669,7 @@ function buildBuildingPanel(container){
 
   var legendRow=el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap"});
   legendRow.appendChild(el("div",{class:"hint",style:"margin:0;flex:1;min-width:200px"},
-    [gridFt+"′ canvas · grid = "+SS_GRID_DIV+"′ · scroll or +/− to zoom · dropped blocks auto-fill the floor outline keeping their GSF ("+SS_MASK_FT+"′ cells) · drag a placed block to re-flow it · hover for × delete"]));
+    [gridFt+"′ canvas · grid = "+SS_GRID_DIV+"′ · scroll or +/− to zoom · dropped blocks auto-fill the usable floor area keeping their GSF ("+SS_MASK_FT+"′ cells) · grey = unusable · drag a placed block to re-flow it · hover for × delete"]));
   // Section draw toggle
   if(!SS._sectionDrawMode) SS._sectionDrawMode=false;
   legendRow.appendChild(el("button",{
@@ -674,8 +732,8 @@ function buildBuildingPanel(container){
     }
     innerWorld.appendChild(gridSvg);
 
-    // Floor outline background
-    var fp=FLOOR_SVGS[SS_PLAN_KEY[lvlDef.plan]];
+    // Floor plan background
+    var fp=FLOOR_SVGS[ssPlanKey(lvlDef.plan)];
     if(fp){
       var pxPerU=ssFtPerUnit()*SS_GRID_PX_PER_FT*lz;
       var fw=fp.vb[2]*pxPerU, fh=fp.vb[3]*pxPerU;
@@ -694,6 +752,7 @@ function buildBuildingPanel(container){
     }
 
     // Placed blocks — smart-filled regions that hug the floor outline
+    var lvlMask=ssFloorMask(ssPlanKey(lvlDef.plan), lvlDef.avail_sf);
     var fills=ssComputeFills(bdef, bs, li);
     var cellPx=SS_MASK_FT*SS_GRID_PX_PER_FT*lz;   // display px per mask cell
     var fox=0, foy=0;
@@ -702,9 +761,61 @@ function buildBuildingPanel(container){
       fox=(scaledCanvas-fp.vb[2]*pxPerU2)/2;
       foy=(scaledCanvas-fp.vb[3]*pxPerU2)/2;
     }
+
+    // Available-Area divider (Stilts Level 3): grey out the area below the
+    // computed line so only avail_sf of white area remains placeable above it.
+    if(lvlMask&&lvlMask.divider){
+      var dv=lvlMask.divider;
+      if(dv.runs.length){
+        var cutSvg=document.createElementNS(svgNS,"svg");
+        var cbb={x0:1e9,y0:1e9,x1:-1,y1:-1};
+        dv.runs.forEach(function(rn){
+          if(rn.x0<cbb.x0)cbb.x0=rn.x0; if(rn.x1+1>cbb.x1)cbb.x1=rn.x1+1;
+          if(rn.y<cbb.y0)cbb.y0=rn.y;   if(rn.y+1>cbb.y1)cbb.y1=rn.y+1;
+        });
+        cutSvg.setAttribute("viewBox",cbb.x0+" "+cbb.y0+" "+(cbb.x1-cbb.x0)+" "+(cbb.y1-cbb.y0));
+        cutSvg.setAttribute("width",(cbb.x1-cbb.x0)*cellPx);
+        cutSvg.setAttribute("height",(cbb.y1-cbb.y0)*cellPx);
+        cutSvg.setAttribute("preserveAspectRatio","none");
+        cutSvg.style.cssText="position:absolute;left:"+(fox+cbb.x0*cellPx)+"px;top:"+(foy+cbb.y0*cellPx)+"px;pointer-events:none;z-index:1";
+        dv.runs.forEach(function(rn){
+          var rc=document.createElementNS(svgNS,"rect");
+          rc.setAttribute("x",rn.x0);rc.setAttribute("y",rn.y);
+          rc.setAttribute("width",rn.x1-rn.x0+1);rc.setAttribute("height",1.03);
+          rc.setAttribute("fill","#d2d0cf");rc.setAttribute("fill-opacity","0.85");
+          cutSvg.appendChild(rc);
+        });
+        innerWorld.appendChild(cutSvg);
+      }
+      if(dv.row<lvlMask.H&&fp){
+        var lineY=foy+dv.row*cellPx;
+        innerWorld.appendChild(el("div",{style:[
+          "position:absolute","left:"+fox+"px","top:"+(lineY-1)+"px",
+          "width:"+(fp.vb[2]*ssFtPerUnit()*SS_GRID_PX_PER_FT*lz)+"px","height:2px",
+          "background:#233044","z-index:5","pointer-events:none"
+        ].join(";")}));
+      }
+    }
+
+    var noFitCount=0;
     fills.forEach(function(f,ii){
       var item=f.item;
-      if(!f.bbox) return;
+      if(!f.bbox){
+        // Block couldn't get any cells (no free area) — show a removable warning chip
+        var cat0=ssCat(item.catId);
+        var chip=el("div",{style:"position:absolute;left:4px;top:"+(4+noFitCount*20)+"px;z-index:20;background:#fff;border:1px solid #C0392B;color:#C0392B;font-size:9px;font-weight:800;padding:1px 5px;display:flex;align-items:center;gap:5px"},
+          ["⚠ "+(cat0?cat0.name:item.catId)+" ×"+item.factor+" — no room",
+           el("span",{style:"cursor:pointer;font-weight:900",onclick:function(ev){
+             ev.stopPropagation();
+             var idx=items.indexOf(item);
+             if(idx>=0) items.splice(idx,1);
+             var pp=document.getElementById("ss-prog-panel");if(pp)buildBlocksPanel(pp);
+             buildBuildingPanel(container);
+           }},["✕"])]);
+        canvasWrap.appendChild(chip);
+        noFitCount++;
+        return;
+      }
       var cat=ssCat(item.catId);
       var color=cat?cat.color:"#C2C3C8";
       var bw=(f.bbox.x1-f.bbox.x0)*cellPx, bh=(f.bbox.y1-f.bbox.y0)*cellPx;
@@ -902,7 +1013,10 @@ function buildBuildingPanel(container){
       var cRect=canvasWrap.getBoundingClientRect();
       var curPanX=bs.levelPan[li][0],curPanY=bs.levelPan[li][1];
 
-      var seed=ssDropSeed(e, cRect, curPanX, curPanY, lz, SS_PLAN_KEY[lvlDef.plan], worldPx0);
+      var dropMask=ssFloorMask(ssPlanKey(lvlDef.plan), lvlDef.avail_sf);
+      if(!dropMask){ return; }
+      if(dropMask.freeCount<=0){ alert("No usable (white / colored) area on "+lvlDef.label+" — grey area can't hold program."); return; }
+      var seed=ssDropSeed(e, cRect, curPanX, curPanY, lz, ssPlanKey(lvlDef.plan), worldPx0);
       if(data.isBuildingMove){
         var srcB=ssScenario().buildings[data.fromBuilding];
         if(!srcB) return;
@@ -967,15 +1081,40 @@ function buildBuildingPanel(container){
     fRow.appendChild(htWrap);
     fRow.appendChild(el("span",{style:"font-size:10px;color:var(--mut)"},[fmt(floorSFRounded(lvlDef.units2))+" GSF plate"]));
     footer.appendChild(fRow);
-    if(lvlGSF>0){
-      var pctFill=plate>0?lvlGSF/plate:0;
+
+    var avail=lvlMask?lvlMask.freeCount*lvlMask.cellSF:null;
+
+    // Available Area input (levels with an avail_sf setting, e.g. Stilts L3)
+    if(lvlDef.avail_sf!==undefined){
+      var aRow=el("div",{style:"display:flex;align-items:center;gap:5px;font-size:10px;color:var(--ink)"});
+      aRow.appendChild(el("span",{style:"font-weight:800"},["Available Area"]));
+      var aInp=el("input",{type:"text",value:String(lvlDef.avail_sf),
+        title:"Placeable (white) area above the divider line, in SF — the line moves to match",
+        style:"width:58px;font-size:10px;font-weight:700;border:1px solid var(--line2);padding:1px 4px;text-align:center;font-family:inherit"});
+      aInp.addEventListener("change",function(){
+        var v=parseFloat(aInp.value.replace(/[^0-9.]/g,""));
+        lvlDef.avail_sf=(isNaN(v)||v<0)?0:Math.round(v);
+        buildBuildingPanel(container);
+        var pp=document.getElementById("ss-prog-panel");if(pp)buildBlocksPanel(pp);
+        var sp=document.getElementById("ss-site-panel");if(sp)buildSitePanel(sp);
+      });
+      aInp.addEventListener("mousedown",function(e){e.stopPropagation();});
+      aRow.appendChild(aInp);
+      aRow.appendChild(el("span",{style:"color:var(--mut)"},["SF · white area above the line"]));
+      footer.appendChild(aRow);
+    }
+
+    if(!lvlMask){
+      footer.appendChild(el("div",{style:"font-size:10px;color:var(--faint)"},["Rasterizing floor plan…"]));
+    } else if(lvlGSF>0){
+      var pctFill=avail>0?lvlGSF/avail:(lvlGSF>0?2:0);
       var pctColor=pctFill>1?"#C0392B":(pctFill>0.9?"#E67E22":"#2E7D32");
-      var sRow=el("div",{style:"display:flex;gap:10px;align-items:center"});
+      var sRow=el("div",{style:"display:flex;gap:10px;align-items:center;flex-wrap:wrap"});
       sRow.appendChild(el("span",{style:"font-size:10px;font-weight:700;color:var(--ink)"},[fmt(lvlGSF)+" GSF placed"]));
-      sRow.appendChild(el("span",{style:"font-size:10px;color:"+pctColor+";font-weight:800"},[(pctFill*100).toFixed(0)+"% full"+(pctFill>1?" — OVERFLOW":"")]));
+      sRow.appendChild(el("span",{style:"font-size:10px;color:"+pctColor+";font-weight:800"},[(pctFill*100).toFixed(0)+"% of "+fmt(avail)+" SF usable"+(pctFill>1?" — OVERFLOW":"")]));
       footer.appendChild(sRow);
     } else {
-      footer.appendChild(el("div",{style:"font-size:10px;color:var(--faint)"},["Drop program blocks here"]));
+      footer.appendChild(el("div",{style:"font-size:10px;color:var(--faint)"},["Drop program blocks here · "+fmt(avail)+" SF usable (grey = unusable)"]));
     }
     card.appendChild(footer);
     levelsRow.appendChild(card);
@@ -985,9 +1124,13 @@ function buildBuildingPanel(container){
 
   // Building total
   var bTot=ssPlacedGSFForBuilding(bdef.id);
-  var bCap=bdef.floors.reduce(function(a,f){return a+floorSF(f.units2);},0);
+  var bCap=0, capReady=true;
+  bdef.floors.forEach(function(f2){
+    var m2=ssFloorMask(ssPlanKey(f2.plan), f2.avail_sf);
+    if(m2) bCap+=m2.freeCount*m2.cellSF; else capReady=false;
+  });
   container.appendChild(el("div",{class:"hint",style:"margin-top:8px"},
-    [bdef.name+": "+fmt(bTot)+" GSF placed of "+fmt(bCap)+" GSF floor plate capacity ("+(bCap>0?(bTot/bCap*100).toFixed(0):0)+"%). Plates measured from the floor plan SVGs at the Project Assumptions scale."]));
+    [bdef.name+": "+fmt(bTot)+" GSF placed of "+(capReady?fmt(bCap):"…")+" SF usable area"+(capReady&&bCap>0?" ("+(bTot/bCap*100).toFixed(0)+"%)":"")+". Grey areas are unusable; usable area measured from the floor plan SVGs at the Project Assumptions scale."]));
   buildSectionView(container, bdef, bs);
 }
 
@@ -1008,7 +1151,7 @@ function buildSectionView(container, bdef, bs){
   var worldPx0Sec=gridFtSec*SS_GRID_PX_PER_FT;
   var levelData=bdef.floors.map(function(lvlDef,li){
     var fills=ssComputeFills(bdef, bs, li);
-    var key=SS_PLAN_KEY[lvlDef.plan];
+    var key=ssPlanKey(lvlDef.plan);
     var fp=FLOOR_SVGS[key];
     var pxPerU=ssFtPerUnit()*SS_GRID_PX_PER_FT;
     var fox=fp?(worldPx0Sec-fp.vb[2]*pxPerU)/2:0;
