@@ -100,6 +100,216 @@ function ssBlockStats(catId, factor){
   return "";
 }
 
+// ====================================================================
+// FLOOR MASK + SMART FILL
+// Each floor outline is rasterized (synchronously, from its <line>
+// segments) into a grid of SS_MASK_FT × SS_MASK_FT cells. A dropped
+// block "pours" into the outline from its seed point: nearest-free-cell
+// snap, then Chebyshev-distance growth over free interior cells until
+// the block's GSF is reached — so blocks keep their area, hug the
+// outline and neighboring blocks, and can never fall outside the floor.
+// ====================================================================
+var SS_MASK_FT = 3;          // fill-grid cell size in feet (9 SF / cell)
+var _ssLineCache = {};
+var _ssMaskCache = {};
+
+function ssFloorLines(key){
+  if(_ssLineCache[key]) return _ssLineCache[key];
+  var fp=FLOOR_SVGS[key]; if(!fp) return [];
+  var out=[];
+  var re=/<line[^>]*x1="([\d.-]+)"[^>]*y1="([\d.-]+)"[^>]*x2="([\d.-]+)"[^>]*y2="([\d.-]+)"/g, m;
+  while((m=re.exec(fp.svg))) out.push([+m[1],+m[2],+m[3],+m[4]]);
+  _ssLineCache[key]=out;
+  return out;
+}
+
+function ssFloorMask(key){
+  var fpu=ssFtPerUnit();
+  var ck=key+"|"+fpu.toFixed(5);
+  if(_ssMaskCache[ck]) return _ssMaskCache[ck];
+  var fp=FLOOR_SVGS[key]; if(!fp) return null;
+  var upc=SS_MASK_FT/fpu;                       // svg units per cell
+  var W=Math.ceil(fp.vb[2]/upc), H=Math.ceil(fp.vb[3]/upc);
+  var cv=document.createElement("canvas"); cv.width=W; cv.height=H;
+  var ctx=cv.getContext("2d",{willReadFrequently:true});
+  ctx.fillStyle="#fff"; ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle="#000"; ctx.lineWidth=1.1; ctx.lineCap="round";
+  ctx.beginPath();
+  ssFloorLines(key).forEach(function(s){
+    ctx.moveTo((s[0]-fp.vb[0])/upc,(s[1]-fp.vb[1])/upc);
+    ctx.lineTo((s[2]-fp.vb[0])/upc,(s[3]-fp.vb[1])/upc);
+  });
+  ctx.stroke();
+  var d=ctx.getImageData(0,0,W,H).data;
+  var wall=new Uint8Array(W*H);
+  for(var i=0;i<W*H;i++){ if(d[i*4]<235) wall[i]=1; }
+  // flood-fill the exterior from the borders
+  var ext=new Uint8Array(W*H), stack=[];
+  for(var x=0;x<W;x++){ stack.push(x,(H-1)*W+x); }
+  for(var y=0;y<H;y++){ stack.push(y*W, y*W+W-1); }
+  while(stack.length){
+    var p=stack.pop();
+    if(ext[p]||wall[p]) continue;
+    ext[p]=1;
+    var cx=p%W, cy=(p-cx)/W;
+    if(cx>0)stack.push(p-1); if(cx<W-1)stack.push(p+1);
+    if(cy>0)stack.push(p-W); if(cy<H-1)stack.push(p+W);
+  }
+  var interior=new Uint8Array(W*H);
+  for(var j=0;j<W*H;j++){ if(!ext[j]&&!wall[j]) interior[j]=1; }
+  // Recover the inner half of the rasterized wall band: wall cells adjacent
+  // to interior become fillable (the outer boundary stays sealed by ext).
+  var grown=new Uint8Array(interior), free=0;
+  for(var gy=0;gy<H;gy++){
+    for(var gx=0;gx<W;gx++){
+      var gp=gy*W+gx;
+      if(wall[gp]&&!ext[gp]&&!interior[gp]){
+        if((gx>0&&interior[gp-1])||(gx<W-1&&interior[gp+1])||(gy>0&&interior[gp-W])||(gy<H-1&&interior[gp+W])) grown[gp]=1;
+      }
+    }
+  }
+  for(var j2=0;j2<W*H;j2++){ if(grown[j2]) free++; }
+  var mask={W:W,H:H,upc:upc,cellSF:SS_MASK_FT*SS_MASK_FT,interior:grown,freeCount:free};
+  _ssMaskCache[ck]=mask;
+  return mask;
+}
+
+// Binary min-heap of [key, value]
+function ssHeapPush(h,k,v){
+  h.push([k,v]); var i=h.length-1;
+  while(i>0){ var p=(i-1)>>1; if(h[p][0]<=h[i][0])break; var t=h[p];h[p]=h[i];h[i]=t; i=p; }
+}
+function ssHeapPop(h){
+  var top=h[0], last=h.pop();
+  if(h.length){ h[0]=last;
+    for(var i=0;;){ var l=2*i+1, r=l+1, m=i;
+      if(l<h.length&&h[l][0]<h[m][0])m=l;
+      if(r<h.length&&h[r][0]<h[m][0])m=r;
+      if(m===i)break; var t=h[m];h[m]=h[i];h[i]=t; i=m; }
+  }
+  return top;
+}
+
+// Nearest free interior cell to (sx,sy) — plain BFS proximity search
+function ssNearestFree(mask,taken,sx,sy){
+  var W=mask.W,H=mask.H;
+  var start=sy*W+sx;
+  if(mask.interior[start]&&!taken[start]) return start;
+  var seen=new Uint8Array(W*H), q=[start]; seen[start]=1;
+  var qi=0;
+  while(qi<q.length){
+    var p=q[qi++];
+    var cx=p%W, cy=(p-cx)/W;
+    var nb=[];
+    if(cx>0)nb.push(p-1); if(cx<W-1)nb.push(p+1);
+    if(cy>0)nb.push(p-W); if(cy<H-1)nb.push(p+W);
+    for(var i=0;i<nb.length;i++){
+      var n=nb[i];
+      if(seen[n])continue;
+      seen[n]=1;
+      if(mask.interior[n]&&!taken[n]) return n;
+      q.push(n);
+    }
+  }
+  return -1;
+}
+
+// Compute the fill regions for all blocks placed on one level.
+// Returns [{item, cells, runs, bbox, centroid, gsf, fitGSF, truncated}], in item order.
+function ssComputeFills(bdef, bs, li){
+  var lvlDef=bdef.floors[li];
+  var key=SS_PLAN_KEY[lvlDef.plan];
+  var mask=ssFloorMask(key);
+  var items=bs.levels[li]||[];
+  var out=[];
+  if(!mask){ items.forEach(function(it){ out.push({item:it,cells:[],runs:[],bbox:null,centroid:null,gsf:ssBlockGSF(it.catId,it.factor),fitGSF:0,truncated:true}); }); return out; }
+  var W=mask.W,H=mask.H;
+  var taken=new Uint8Array(W*H);
+  items.forEach(function(item){
+    var gsf=ssBlockGSF(item.catId,item.factor);
+    var need=Math.max(1,Math.round(gsf/mask.cellSF));
+    var su=isFinite(item.su)?item.su:FLOOR_SVGS[key].vb[2]/2;
+    var sv=isFinite(item.sv)?item.sv:FLOOR_SVGS[key].vb[3]/2;
+    var sx=Math.max(0,Math.min(W-1,Math.round(su/mask.upc)));
+    var sy=Math.max(0,Math.min(H-1,Math.round(sv/mask.upc)));
+    var seedIdx=ssNearestFree(mask,taken,sx,sy);
+    if(seedIdx<0){
+      out.push({item:item,cells:[],runs:[],bbox:null,centroid:null,gsf:gsf,fitGSF:0,truncated:true});
+      return;
+    }
+    var s0x=seedIdx%W, s0y=(seedIdx-s0x)/W;
+    // Chebyshev-priority growth
+    var cells=[];
+    var inQ=new Uint8Array(W*H);
+    var heap=[]; ssHeapPush(heap,0,seedIdx); inQ[seedIdx]=1;
+    while(cells.length<need && heap.length){
+      var p=ssHeapPop(heap)[1];
+      cells.push(p); taken[p]=1;
+      var cx=p%W, cy=(p-cx)/W;
+      var nb=[];
+      if(cx>0)nb.push(p-1); if(cx<W-1)nb.push(p+1);
+      if(cy>0)nb.push(p-W); if(cy<H-1)nb.push(p+W);
+      for(var i=0;i<nb.length;i++){
+        var n=nb[i];
+        if(inQ[n]||!mask.interior[n]||taken[n]) continue;
+        inQ[n]=1;
+        var nx=n%W, ny=(n-nx)/W;
+        var dxx=Math.abs(nx-s0x), dyy=Math.abs(ny-s0y);
+        ssHeapPush(heap, Math.max(dxx,dyy)*1000+(dxx+dyy), n);
+      }
+    }
+    // Row RLE runs + bbox + centroid
+    var byRow={}, minX=1e9,minY=1e9,maxX=-1,maxY=-1, sumX=0,sumY=0;
+    cells.forEach(function(p){
+      var cx2=p%W, cy2=(p-cx2)/W;
+      (byRow[cy2]=byRow[cy2]||[]).push(cx2);
+      if(cx2<minX)minX=cx2; if(cx2>maxX)maxX=cx2;
+      if(cy2<minY)minY=cy2; if(cy2>maxY)maxY=cy2;
+      sumX+=cx2; sumY+=cy2;
+    });
+    var runs=[];
+    Object.keys(byRow).forEach(function(rk){
+      var row=byRow[rk].sort(function(a,b){return a-b;});
+      var y=+rk, st=row[0], prev=row[0];
+      for(var i2=1;i2<=row.length;i2++){
+        if(i2<row.length && row[i2]===prev+1){ prev=row[i2]; continue; }
+        runs.push({y:y,x0:st,x1:prev});
+        if(i2<row.length){ st=row[i2]; prev=row[i2]; }
+      }
+    });
+    // Perimeter edges (cell-boundary segments where neighbor is outside the region)
+    var inRegion=new Uint8Array(W*H);
+    cells.forEach(function(p){ inRegion[p]=1; });
+    var edges=[];
+    cells.forEach(function(p){
+      var cx3=p%W, cy3=(p-cx3)/W;
+      if(cx3===0||!inRegion[p-1])   edges.push([cx3,cy3,cx3,cy3+1]);
+      if(cx3===W-1||!inRegion[p+1]) edges.push([cx3+1,cy3,cx3+1,cy3+1]);
+      if(cy3===0||!inRegion[p-W])   edges.push([cx3,cy3,cx3+1,cy3]);
+      if(cy3===H-1||!inRegion[p+W]) edges.push([cx3,cy3+1,cx3+1,cy3+1]);
+    });
+    out.push({
+      item:item, cells:cells, runs:runs, edges:edges,
+      bbox:cells.length?{x0:minX,y0:minY,x1:maxX+1,y1:maxY+1}:null,
+      centroid:cells.length?[sumX/cells.length+0.5, sumY/cells.length+0.5]:null,
+      gsf:gsf, fitGSF:cells.length*mask.cellSF,
+      truncated:cells.length<need
+    });
+  });
+  return out;
+}
+
+// Drop-event position → floor-svg-unit seed coordinates (relative to vb origin)
+function ssDropSeed(e, cRect, panX, panY, lz, key, worldPx0){
+  var fp=FLOOR_SVGS[key];
+  var wx=(e.clientX-cRect.left-panX)/lz;
+  var wy=(e.clientY-cRect.top-panY)/lz;
+  if(!fp) return {su:0, sv:0};
+  var pxPerU=ssFtPerUnit()*SS_GRID_PX_PER_FT;
+  var ox=(worldPx0-fp.vb[2]*pxPerU)/2, oy=(worldPx0-fp.vb[3]*pxPerU)/2;
+  return {su:(wx-ox)/pxPerU, sv:(wy-oy)/pxPerU};
+}
+
 // ── Scenario state ──────────────────────────────────────────────────────
 function ssDefaultBlocks(){
   return S.program.map(function(c){ return {id:c.id+"_1", catId:c.id, factor:1}; });
@@ -167,7 +377,7 @@ function ssPlacedGSFForLevel(bldgId, li){
   var sc=ssScenario();
   for(var bi=0;bi<sc.buildings.length;bi++){
     if(sc.buildings[bi].id===bldgId){
-      return (sc.buildings[bi].levels[li]||[]).reduce(function(s,it){return s+(it.gsf||0);},0);
+      return (sc.buildings[bi].levels[li]||[]).reduce(function(s,it){return s+ssBlockGSF(it.catId,it.factor);},0);
     }
   }
   return 0;
@@ -177,7 +387,7 @@ function ssPlacedGSFForBuilding(bldgId){
   for(var bi=0;bi<sc.buildings.length;bi++){
     if(sc.buildings[bi].id===bldgId){
       return sc.buildings[bi].levels.reduce(function(s,lvl){
-        return s+lvl.reduce(function(t,it){return t+(it.gsf||0);},0);
+        return s+lvl.reduce(function(t,it){return t+ssBlockGSF(it.catId,it.factor);},0);
       },0);
     }
   }
@@ -401,7 +611,7 @@ function buildBuildingPanel(container){
 
   var legendRow=el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap"});
   legendRow.appendChild(el("div",{class:"hint",style:"margin:0;flex:1;min-width:200px"},
-    [gridFt+"′ canvas · grid = "+SS_GRID_DIV+"′ · scroll or +/− to zoom each level · hover a placed block for ↻ rotate / × delete"]));
+    [gridFt+"′ canvas · grid = "+SS_GRID_DIV+"′ · scroll or +/− to zoom · dropped blocks auto-fill the floor outline keeping their GSF ("+SS_MASK_FT+"′ cells) · drag a placed block to re-flow it · hover for × delete"]));
   // Section draw toggle
   if(!SS._sectionDrawMode) SS._sectionDrawMode=false;
   legendRow.appendChild(el("button",{
@@ -420,26 +630,6 @@ function buildBuildingPanel(container){
       onclick:function(){bs.sectionLine=null;buildBuildingPanel(container);}
     },["✕ Clear"]));
   }
-  legendRow.appendChild(el("button",{
-    class:"seg sm",
-    title:"Re-read GSF and dimensions for all placed blocks from the current program.",
-    onclick:function(){
-      sc.buildings.forEach(function(b2){
-        b2.levels.forEach(function(lvl){
-          lvl.forEach(function(item){
-            item.gsf=ssBlockGSF(item.catId,item.factor);
-            var d=ssBlockDims(item.gsf);
-            var rotated=item.gw<item.gh;
-            item.gw=rotated?d.gh:d.gw;
-            item.gh=rotated?d.gw:d.gh;
-          });
-        });
-      });
-      var pp=document.getElementById("ss-prog-panel");if(pp)buildBlocksPanel(pp);
-      buildBuildingPanel(container);
-      var sp=document.getElementById("ss-site-panel");if(sp)buildSitePanel(sp);
-    }
-  },["⟳ Sync to program"]));
   container.appendChild(legendRow);
 
   var worldPx0=gridFt*SS_GRID_PX_PER_FT;   // world px at zoom=1
@@ -449,7 +639,7 @@ function buildBuildingPanel(container){
   bdef.floors.forEach(function(lvlDef,li){
     var items=bs.levels[li];
     var plate=floorSF(lvlDef.units2);
-    var lvlGSF=items.reduce(function(s,it){return s+(it.gsf||0);},0);
+    var lvlGSF=items.reduce(function(s,it){return s+ssBlockGSF(it.catId,it.factor);},0);
     var lz=bs.levelZoom[li]||ssFitZoom(bdef);
     var scaledCanvas=Math.round(worldPx0*lz);
 
@@ -503,75 +693,92 @@ function buildBuildingPanel(container){
       innerWorld.appendChild(fpDiv);
     }
 
-    // Placed blocks
-    items.forEach(function(item,ii){
+    // Placed blocks — smart-filled regions that hug the floor outline
+    var fills=ssComputeFills(bdef, bs, li);
+    var cellPx=SS_MASK_FT*SS_GRID_PX_PER_FT*lz;   // display px per mask cell
+    var fox=0, foy=0;
+    if(fp){
+      var pxPerU2=ssFtPerUnit()*SS_GRID_PX_PER_FT*lz;
+      fox=(scaledCanvas-fp.vb[2]*pxPerU2)/2;
+      foy=(scaledCanvas-fp.vb[3]*pxPerU2)/2;
+    }
+    fills.forEach(function(f,ii){
+      var item=f.item;
+      if(!f.bbox) return;
       var cat=ssCat(item.catId);
       var color=cat?cat.color:"#C2C3C8";
-      var px=Math.round((item.px||10)*lz),py=Math.round((item.py||10)*lz);
-      var gw=Math.round((item.gw||20)*lz),gh=Math.round((item.gh||20)*lz);
-      var gwD=Math.max(10,gw),ghD=Math.max(10,gh);
+      var bw=(f.bbox.x1-f.bbox.x0)*cellPx, bh=(f.bbox.y1-f.bbox.y0)*cellPx;
+      var bx=fox+f.bbox.x0*cellPx, by=foy+f.bbox.y0*cellPx;
 
       var rEl=el("div",{
-        title:(cat?cat.name:item.catId)+" × "+item.factor+" | "+fmt(item.gsf)+" GSF",
+        title:(cat?cat.name:item.catId)+" × "+item.factor+" | "+fmt(f.gsf)+" GSF"+(f.truncated?" — ⚠ only "+fmt(f.fitGSF)+" GSF fits here":""),
         style:[
-          "position:absolute","left:"+px+"px","top:"+py+"px",
-          "width:"+gwD+"px","height:"+ghD+"px",
-          "background:"+color,
-          "border:1.5px solid "+darkenColor(color,0.3),
-          "box-sizing:border-box",
-          "cursor:move","user-select:none","z-index:2",
+          "position:absolute","left:"+bx+"px","top:"+by+"px",
+          "width:"+bw+"px","height:"+bh+"px",
+          "cursor:move","user-select:none","z-index:"+(2+ii),
           "overflow:visible"
         ].join(";")
       });
 
-      if(ghD>=16&&gwD>=30){
-        rEl.appendChild(el("div",{style:"position:absolute;bottom:1px;left:3px;font-size:8px;font-weight:700;line-height:1.2;color:#233044CC;pointer-events:none;white-space:nowrap;overflow:hidden;max-width:"+(gwD-6)+"px"},
-          [(cat?cat.name:item.catId)+" ×"+item.factor+" · "+fmt(item.gsf)+" GSF"]));
+      var svgNSr="http://www.w3.org/2000/svg";
+      var rsvg=document.createElementNS(svgNSr,"svg");
+      rsvg.setAttribute("viewBox",f.bbox.x0+" "+f.bbox.y0+" "+(f.bbox.x1-f.bbox.x0)+" "+(f.bbox.y1-f.bbox.y0));
+      rsvg.setAttribute("width",bw); rsvg.setAttribute("height",bh);
+      rsvg.setAttribute("preserveAspectRatio","none");
+      rsvg.style.cssText="display:block;pointer-events:none;overflow:visible";
+      f.runs.forEach(function(rn){
+        var rc=document.createElementNS(svgNSr,"rect");
+        rc.setAttribute("x",rn.x0);rc.setAttribute("y",rn.y);
+        rc.setAttribute("width",rn.x1-rn.x0+1);rc.setAttribute("height",1.03);
+        rc.setAttribute("fill",color);rc.setAttribute("fill-opacity","0.82");
+        rsvg.appendChild(rc);
+      });
+      if(f.edges&&f.edges.length){
+        var dstr="";
+        f.edges.forEach(function(e2){ dstr+="M"+e2[0]+" "+e2[1]+"L"+e2[2]+" "+e2[3]; });
+        var per=document.createElementNS(svgNSr,"path");
+        per.setAttribute("d",dstr);
+        per.setAttribute("stroke",darkenColor(color,0.35));
+        per.setAttribute("stroke-width","0.16");
+        per.setAttribute("fill","none");
+        rsvg.appendChild(per);
+      }
+      rEl.appendChild(rsvg);
+
+      // Label at region centroid
+      if(bw>=46&&bh>=16){
+        var lxPct=((f.centroid[0]-f.bbox.x0)/(f.bbox.x1-f.bbox.x0))*100;
+        var lyPct=((f.centroid[1]-f.bbox.y0)/(f.bbox.y1-f.bbox.y0))*100;
+        rEl.appendChild(el("div",{style:"position:absolute;left:"+lxPct+"%;top:"+lyPct+"%;transform:translate(-50%,-50%);font-size:9px;font-weight:800;color:#233044;pointer-events:none;text-align:center;line-height:1.25;text-shadow:0 0 3px #fff,0 0 3px #fff,0 0 4px #fff;white-space:nowrap"},
+          [(cat?cat.name:item.catId)+" ×"+item.factor,
+           el("br"),
+           fmt(f.gsf)+" GSF"+(f.truncated?" ⚠":"")]));
       }
 
-      var rotBtn=el("div",{
-        title:"Rotate 90°",
-        style:"position:absolute;top:-6px;left:-6px;width:14px;height:14px;border-radius:50%;background:#1266cc;color:#fff;font-size:9px;line-height:14px;text-align:center;cursor:pointer;z-index:10;display:none;box-shadow:0 1px 3px #0004",
-        onclick:function(e){
-          e.stopPropagation();e.preventDefault();
-          var oldGw=item.gw,oldGh=item.gh;
-          var cx=(item.px||0)+oldGw/2, cy=(item.py||0)+oldGh/2;
-          item.gw=oldGh; item.gh=oldGw;
-          item.px=Math.max(0,Math.min(worldPx0-item.gw,Math.round(cx-item.gw/2)));
-          item.py=Math.max(0,Math.min(worldPx0-item.gh,Math.round(cy-item.gh/2)));
-          buildBuildingPanel(container);
-          var sp=document.getElementById("ss-site-panel");if(sp)buildSitePanel(sp);
-        }
-      },["↻"]);
       var delBtn=el("div",{
-        style:"position:absolute;top:-6px;right:-6px;width:14px;height:14px;border-radius:50%;background:#C0392B;color:#fff;font-size:9px;line-height:14px;text-align:center;cursor:pointer;z-index:10;display:none;box-shadow:0 1px 3px #0004",
+        title:"Remove from this level",
+        style:"position:absolute;top:-7px;right:-7px;width:15px;height:15px;border-radius:50%;background:#C0392B;color:#fff;font-size:9px;line-height:15px;text-align:center;cursor:pointer;z-index:10;display:none;box-shadow:0 1px 3px #0004",
         onclick:function(e){
           e.stopPropagation();e.preventDefault();
-          items.splice(ii,1);
+          var idx=items.indexOf(item);
+          if(idx>=0) items.splice(idx,1);
           var pp=document.getElementById("ss-prog-panel");if(pp)buildBlocksPanel(pp);
           buildBuildingPanel(container);
           var sp=document.getElementById("ss-site-panel");if(sp)buildSitePanel(sp);
         }
       },["×"]);
-      rEl.addEventListener("mouseenter",function(){rotBtn.style.display="block";delBtn.style.display="block";});
-      rEl.addEventListener("mouseleave",function(){rotBtn.style.display="none";delBtn.style.display="none";});
-      rEl.appendChild(rotBtn);
+      rEl.addEventListener("mouseenter",function(){delBtn.style.display="block";});
+      rEl.addEventListener("mouseleave",function(){delBtn.style.display="none";});
       rEl.appendChild(delBtn);
 
+      // Drag to re-seed (same level, other level, or other building)
       rEl.setAttribute("draggable","true");
-      var dragOffX=0,dragOffY=0;
-      rEl.addEventListener("mousedown",function(e){
-        var r=rEl.getBoundingClientRect();
-        dragOffX=e.clientX-r.left;
-        dragOffY=e.clientY-r.top;
-      });
       rEl.addEventListener("dragstart",function(e){
-        if(e.target===delBtn||e.target===rotBtn){e.preventDefault();return;}
+        if(e.target===delBtn){e.preventDefault();return;}
         e.dataTransfer.effectAllowed="move";
         e.dataTransfer.setData("text/plain",JSON.stringify({
-          id:item.id,gw:item.gw,gh:item.gh,
+          id:item.id,
           fromBuilding:SS.activeBuilding,fromLevel:li,
-          dragOffX:dragOffX,dragOffY:dragOffY,
           isBuildingMove:true
         }));
         setTimeout(function(){rEl.style.opacity="0.3";},0);
@@ -695,33 +902,25 @@ function buildBuildingPanel(container){
       var cRect=canvasWrap.getBoundingClientRect();
       var curPanX=bs.levelPan[li][0],curPanY=bs.levelPan[li][1];
 
+      var seed=ssDropSeed(e, cRect, curPanX, curPanY, lz, SS_PLAN_KEY[lvlDef.plan], worldPx0);
       if(data.isBuildingMove){
         var srcB=ssScenario().buildings[data.fromBuilding];
         if(!srcB) return;
         var srcItems=srcB.levels[data.fromLevel];
         var srcIdx=srcItems.findIndex(function(it){return it.id===data.id;});
         if(srcIdx<0) return;
-        var offX=Math.round((data.dragOffX||0)/lz);
-        var offY=Math.round((data.dragOffY||0)/lz);
-        var it=srcItems[srcIdx];
-        var adjX=Math.max(0,Math.min(worldPx0-(it.gw||20),Math.round((e.clientX-cRect.left-curPanX)/lz)-offX));
-        var adjY=Math.max(0,Math.min(worldPx0-(it.gh||20),Math.round((e.clientY-cRect.top-curPanY)/lz)-offY));
         if(data.fromBuilding===SS.activeBuilding && data.fromLevel===li){
-          it.px=adjX; it.py=adjY;
+          srcItems[srcIdx].su=seed.su; srcItems[srcIdx].sv=seed.sv;
         } else {
           var moved=srcItems.splice(srcIdx,1)[0];
-          moved.px=adjX; moved.py=adjY;
+          moved.su=seed.su; moved.sv=seed.sv;
           items.push(moved);
         }
       } else if(data.isBlock){
         if(ssIsAssigned(data.id)) return;
-        var gsf=ssBlockGSF(data.catId, data.factor);
-        var d=ssBlockDims(gsf);
-        var dropX=Math.max(0,Math.min(worldPx0-d.gw,Math.round((e.clientX-cRect.left-curPanX)/lz)-Math.round(d.gw/2)));
-        var dropY=Math.max(0,Math.min(worldPx0-d.gh,Math.round((e.clientY-cRect.top-curPanY)/lz)-Math.round(d.gh/2)));
         items.push({
           id:data.id, catId:data.catId, factor:data.factor,
-          gsf:gsf, gw:d.gw, gh:d.gh, px:dropX, py:dropY,
+          su:seed.su, sv:seed.sv,
           roomHeight:SS_BLOCK_HT
         });
       } else return;
@@ -805,30 +1004,54 @@ function buildSectionView(container, bdef, bs){
   var lineLenFt=lineLenPx/SS_GRID_PX_PER_FT;
   var svgNS="http://www.w3.org/2000/svg";
 
+  var gridFtSec=ssGridFt(bdef);
+  var worldPx0Sec=gridFtSec*SS_GRID_PX_PER_FT;
   var levelData=bdef.floors.map(function(lvlDef,li){
-    var items=bs.levels[li]||[];
+    var fills=ssComputeFills(bdef, bs, li);
+    var key=SS_PLAN_KEY[lvlDef.plan];
+    var fp=FLOOR_SVGS[key];
+    var pxPerU=ssFtPerUnit()*SS_GRID_PX_PER_FT;
+    var fox=fp?(worldPx0Sec-fp.vb[2]*pxPerU)/2:0;
+    var foy=fp?(worldPx0Sec-fp.vb[3]*pxPerU)/2:0;
+    var cellPx=SS_MASK_FT*SS_GRID_PX_PER_FT;
     var hits=[];
-    items.forEach(function(item){
-      var rx1=item.px||0, ry1=item.py||0, rx2=rx1+(item.gw||0), ry2=ry1+(item.gh||0);
-      var t0=0, t1=1;
-      var p=[-(dx), dx, -(dy), dy];
-      var q=[sl.x1-rx1, rx2-sl.x1, sl.y1-ry1, ry2-sl.y1];
-      var rejected=false;
-      for(var i=0;i<4;i++){
-        if(p[i]===0){ if(q[i]<0){rejected=true;break;} }
-        else {
-          var r=q[i]/p[i];
-          if(p[i]<0){ if(r>t1){rejected=true;break;} if(r>t0)t0=r; }
-          else { if(r<t0){rejected=true;break;} if(r<t1)t1=r; }
+    fills.forEach(function(f){
+      if(!f.runs||!f.runs.length) return;
+      var ints=[];
+      f.runs.forEach(function(rn){
+        var rx1=fox+rn.x0*cellPx, ry1=foy+rn.y*cellPx;
+        var rx2=fox+(rn.x1+1)*cellPx, ry2=foy+(rn.y+1)*cellPx;
+        var t0=0, t1=1;
+        var p=[-(dx), dx, -(dy), dy];
+        var q=[sl.x1-rx1, rx2-sl.x1, sl.y1-ry1, ry2-sl.y1];
+        var rejected=false;
+        for(var i=0;i<4;i++){
+          if(p[i]===0){ if(q[i]<0){rejected=true;break;} }
+          else {
+            var r=q[i]/p[i];
+            if(p[i]<0){ if(r>t1){rejected=true;break;} if(r>t0)t0=r; }
+            else { if(r<t0){rejected=true;break;} if(r<t1)t1=r; }
+          }
         }
+        if(!rejected && t0<t1) ints.push([t0,t1]);
+      });
+      if(!ints.length) return;
+      // Merge the per-run intervals into continuous cut segments
+      ints.sort(function(a,b){return a[0]-b[0];});
+      var eps=(cellPx*0.5)/lineLenPx;
+      var merged=[ints[0].slice()];
+      for(var mi=1;mi<ints.length;mi++){
+        var last=merged[merged.length-1];
+        if(ints[mi][0]<=last[1]+eps) last[1]=Math.max(last[1],ints[mi][1]);
+        else merged.push(ints[mi].slice());
       }
-      if(!rejected && t0<t1){
+      merged.forEach(function(iv){
         hits.push({
-          item:item,
-          startFt:(t0*lineLenPx)/SS_GRID_PX_PER_FT,
-          endFt:(t1*lineLenPx)/SS_GRID_PX_PER_FT
+          item:f.item, gsf:f.gsf,
+          startFt:(iv[0]*lineLenPx)/SS_GRID_PX_PER_FT,
+          endFt:(iv[1]*lineLenPx)/SS_GRID_PX_PER_FT
         });
-      }
+      });
     });
     return hits;
   });
@@ -911,7 +1134,7 @@ function buildSectionView(container, bdef, bs){
       rect.setAttribute("fill",(cat?cat.color:"#ccc"));
       rect.setAttribute("stroke","rgba(0,0,0,0.35)");rect.setAttribute("stroke-width","1");
       var title=document.createElementNS(svgNS,"title");
-      title.textContent=(cat?cat.name:h.item.catId)+" × "+h.item.factor+" — "+fmt(h.item.gsf)+" GSF";
+      title.textContent=(cat?cat.name:h.item.catId)+" × "+h.item.factor+" — "+fmt(h.gsf)+" GSF";
       rect.appendChild(title);
       svg.appendChild(rect);
       if(Math.abs(x2-x1)>40){
