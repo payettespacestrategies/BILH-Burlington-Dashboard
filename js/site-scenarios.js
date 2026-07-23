@@ -32,9 +32,11 @@ function ssNewScenario(name){
     buildings: BLDG_REGISTRY.map(function(b){
       return {
         id: b.id,
-        levels:    b.levels.map(function(){ return []; }),
-        levelZoom: b.levels.map(function(){ return ssFitZoom(b); }),
-        levelPan:  b.levels.map(function(){ return [0,0]; })
+        levels:      b.levels.map(function(){ return []; }),
+        levelZoom:   b.levels.map(function(){ return ssFitZoom(b); }),
+        levelPan:    b.levels.map(function(){ return [0,0]; }),
+        levelHeights:b.levels.map(function(l,i){ return i*14; }),  // vertical datum (ft) per level
+        sectionLine: null   // {x1,y1,x2,y2} in world px (zoom=1), or null
       };
     }),
     groups: []
@@ -58,6 +60,8 @@ function ssNormalizeScenario(sc){
     bs.levels    = (bs.levels||[]).slice(0,n);    while(bs.levels.length<n)    bs.levels.push([]);
     bs.levelZoom = (bs.levelZoom||[]).slice(0,n); while(bs.levelZoom.length<n) bs.levelZoom.push(ssFitZoom(b));
     bs.levelPan  = (bs.levelPan||[]).slice(0,n);  while(bs.levelPan.length<n)  bs.levelPan.push([0,0]);
+    bs.levelHeights = (bs.levelHeights||[]).slice(0,n); while(bs.levelHeights.length<n) bs.levelHeights.push(bs.levelHeights.length*14);
+    if(bs.sectionLine===undefined) bs.sectionLine=null;
     return bs;
   });
   return sc;
@@ -607,6 +611,25 @@ function buildBuildingPanel(container){
   var legendRow=el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:8px"});
   legendRow.appendChild(el("div",{style:"font-size:10px;color:#888;flex:1"},
     [bdef.sub+" · "+bdef.gridFt+"′ canvas · grid = "+SS_GRID_DIV+"′ · scroll or +/− to zoom each level · hover a placed room for ↻ rotate / × delete"]));
+  // Section line draw toggle
+  if(!SS._sectionDrawMode) SS._sectionDrawMode=false;
+  legendRow.appendChild(el("button",{
+    title:"Draw a section cut line — appears on all levels. Short tick marks indicate viewing direction.",
+    style:"padding:3px 10px;font-size:11px;border:1px solid "+(SS._sectionDrawMode?"#C0392B":"var(--line2)")+
+          ";background:"+(SS._sectionDrawMode?"#C0392B":"#fff")+";color:"+(SS._sectionDrawMode?"#fff":"#1F2A44")+
+          ";border-radius:4px;cursor:pointer;font-weight:700;white-space:nowrap",
+    onclick:function(){
+      SS._sectionDrawMode=!SS._sectionDrawMode;
+      buildBuildingPanel(container);
+    }
+  },[SS._sectionDrawMode?"✕ Cancel Section":"📐 Draw Section"]));
+  if(bs.sectionLine){
+    legendRow.appendChild(el("button",{
+      title:"Remove the current section line",
+      style:"padding:3px 8px;font-size:11px;border:1px solid #C0392B44;color:#C0392B;background:#fff;border-radius:4px;cursor:pointer",
+      onclick:function(){bs.sectionLine=null;buildBuildingPanel(container);}
+    },["✕ Clear"]));
+  }
   legendRow.appendChild(el("button",{
     title:"Re-read NSF and dimensions for all placed rooms from the current program. Does not move rooms.",
     style:"padding:3px 10px;font-size:11px;border:1px solid var(--line2);background:#fff;border-radius:4px;cursor:pointer;color:#1F2A44;white-space:nowrap;flex-shrink:0",
@@ -775,9 +798,79 @@ function buildBuildingPanel(container){
 
     canvasWrap.appendChild(innerWorld);
 
+    // ── Section line overlay (fixed to viewport, on top of innerWorld) ──
+    var sectionSvg=document.createElementNS(svgNS,"svg");
+    sectionSvg.setAttribute("width",SS_CANVAS_PX);sectionSvg.setAttribute("height",SS_CANVAS_PX);
+    sectionSvg.style.cssText="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:15";
+    canvasWrap.appendChild(sectionSvg);
+
+    function drawSectionLine(){
+      sectionSvg.innerHTML="";
+      if(!bs.sectionLine) return;
+      var sl=bs.sectionLine;
+      // Convert world coords (zoom=1) to display px (apply zoom + pan)
+      var x1=sl.x1*lz+bs.levelPan[li][0], y1=sl.y1*lz+bs.levelPan[li][1];
+      var x2=sl.x2*lz+bs.levelPan[li][0], y2=sl.y2*lz+bs.levelPan[li][1];
+      var ln=document.createElementNS(svgNS,"line");
+      ln.setAttribute("x1",x1);ln.setAttribute("y1",y1);ln.setAttribute("x2",x2);ln.setAttribute("y2",y2);
+      ln.setAttribute("stroke","#C0392B");ln.setAttribute("stroke-width","2.5");ln.setAttribute("stroke-dasharray","8,4");
+      sectionSvg.appendChild(ln);
+      // Direction tick marks (perpendicular short lines at each end, on the viewing side)
+      var dx=x2-x1, dy=y2-y1, len=Math.sqrt(dx*dx+dy*dy)||1;
+      var pux=-(dy/len), puy=dx/len;
+      var tickLen=10;
+      [[x1,y1],[x2,y2]].forEach(function(pt){
+        var tk=document.createElementNS(svgNS,"line");
+        tk.setAttribute("x1",pt[0]);tk.setAttribute("y1",pt[1]);
+        tk.setAttribute("x2",pt[0]+pux*tickLen);tk.setAttribute("y2",pt[1]+puy*tickLen);
+        tk.setAttribute("stroke","#C0392B");tk.setAttribute("stroke-width","2.5");
+        sectionSvg.appendChild(tk);
+      });
+      [[x1,y1],[x2,y2]].forEach(function(pt){
+        var dot=document.createElementNS(svgNS,"circle");
+        dot.setAttribute("cx",pt[0]);dot.setAttribute("cy",pt[1]);dot.setAttribute("r","3.5");
+        dot.setAttribute("fill","#C0392B");
+        sectionSvg.appendChild(dot);
+      });
+    }
+    drawSectionLine();
+
+    // ── Section line drawing (active only while SS._sectionDrawMode) ──
+    var sectionDrawing=false, sdStartX=0, sdStartY=0;
+    canvasWrap.addEventListener("mousedown",function(e){
+      if(!SS._sectionDrawMode) return;
+      var cr=canvasWrap.getBoundingClientRect();
+      sdStartX=(e.clientX-cr.left-bs.levelPan[li][0])/lz;
+      sdStartY=(e.clientY-cr.top-bs.levelPan[li][1])/lz;
+      sectionDrawing=true;
+      e.preventDefault();e.stopPropagation();
+    });
+    document.addEventListener("mousemove",function(e){
+      if(!sectionDrawing) return;
+      var cr=canvasWrap.getBoundingClientRect();
+      var rawX=(e.clientX-cr.left-bs.levelPan[li][0])/lz;
+      var rawY=(e.clientY-cr.top-bs.levelPan[li][1])/lz;
+      // Snap to nearest 45° increment around the start point
+      var ddx=rawX-sdStartX, ddy=rawY-sdStartY;
+      var dist=Math.sqrt(ddx*ddx+ddy*ddy);
+      var angle=Math.atan2(ddy,ddx);
+      var snapAngle=Math.round(angle/(Math.PI/4))*(Math.PI/4);
+      bs.sectionLine={x1:sdStartX,y1:sdStartY,
+        x2:sdStartX+Math.cos(snapAngle)*dist,
+        y2:sdStartY+Math.sin(snapAngle)*dist};
+      drawSectionLine();
+    });
+    document.addEventListener("mouseup",function(){
+      if(!sectionDrawing) return;
+      sectionDrawing=false;
+      SS._sectionDrawMode=false;
+      buildBuildingPanel(container);
+    });
+
     // ── Pan within canvas ──
     var canvasPanning=false,cpsx=0,cpsy=0,cpox=0,cpoy=0;
     canvasWrap.addEventListener("mousedown",function(e){
+      if(SS._sectionDrawMode) return;  // section drawing takes priority
       if(e.target!==canvasWrap&&e.target!==innerWorld&&e.target.tagName!=="svg"&&e.target.tagName!=="line"&&e.target.tagName!=="rect"&&e.target.tagName!=="polygon"&&e.target.tagName!=="polyline"&&e.target.tagName!=="path"&&e.target.tagName!=="text") return;
       canvasPanning=true;cpsx=e.clientX;cpsy=e.clientY;
       cpox=bs.levelPan[li][0];cpoy=bs.levelPan[li][1];
@@ -792,9 +885,10 @@ function buildBuildingPanel(container){
       bs.levelPan[li][1]=Math.max(minPanY,Math.min(0,cpoy+(e.clientY-cpsy)));
       innerWorld.style.left=bs.levelPan[li][0]+"px";
       innerWorld.style.top=bs.levelPan[li][1]+"px";
+      drawSectionLine();
     });
-    document.addEventListener("mouseup",function(){if(canvasPanning){canvasPanning=false;canvasWrap.style.cursor="crosshair";}});
-    canvasWrap.style.cursor="crosshair";
+    document.addEventListener("mouseup",function(){if(canvasPanning){canvasPanning=false;canvasWrap.style.cursor=SS._sectionDrawMode?"copy":"crosshair";}});
+    canvasWrap.style.cursor=SS._sectionDrawMode?"copy":"crosshair";
     canvasWrap.addEventListener("wheel",function(e){
       e.preventDefault();e.stopPropagation();
       var newZ=Math.max(0.08,Math.min(4.0,(bs.levelZoom[li]||ssFitZoom(bdef))*(e.deltaY<0?1.15:1/1.15)));
@@ -905,6 +999,19 @@ function buildBuildingPanel(container){
     zoomBar.appendChild(el("span",{style:"font-size:10px;min-width:32px;text-align:center;color:#666"},[Math.round((bs.levelZoom[li]||1)*100)+"%"]));
     zoomBar.appendChild(makeZBtn("+",1.25));
     fRow.appendChild(zoomBar);
+    // Level datum height (ft) — used by the section view
+    var htWrap=el("span",{style:"display:flex;align-items:center;gap:3px;font-size:10px;color:#666"});
+    htWrap.appendChild(el("span",null,["HT"]));
+    var htInp=el("input",{type:"text",value:String(bs.levelHeights[li]||0),title:"Level datum height (ft) — used by the section view",
+      style:"width:34px;font-size:10px;border:1px solid #ccd2dc;border-radius:3px;padding:1px 3px;text-align:center"});
+    htInp.addEventListener("change",function(){
+      var v=parseFloat(htInp.value.replace(/[^0-9.\-]/g,""));
+      bs.levelHeights[li]=isNaN(v)?0:v;
+      buildSectionView(container, bdef, bs);
+    });
+    htWrap.appendChild(htInp);
+    htWrap.appendChild(el("span",null,["′"]));
+    fRow.appendChild(htWrap);
     fRow.appendChild(el("span",{style:"font-size:10px;color:#666"},["~"+fmt(lvlDef.plate)+" SF plate"]));
     fRow.appendChild(el("span",{style:"font-size:10px;color:#666"},[items.length+" spaces"]));
     footer.appendChild(fRow);
@@ -924,6 +1031,160 @@ function buildBuildingPanel(container){
 
   container.appendChild(levelsRow);
   if(bdef.note) container.appendChild(el("div",{style:"font-size:10px;color:#aaa;margin-top:6px"},[bdef.note+" Floor plates are approximate."]));
+  buildSectionView(container, bdef, bs);
+}
+
+// ── Section View: cross-section through all levels at the drawn section line ──
+function buildSectionView(container, bdef, bs){
+  var existing=document.getElementById("ss-section-view");
+  if(existing) existing.remove();
+  if(!bs || !bs.sectionLine) return;
+
+  var sl=bs.sectionLine;
+  var dx=sl.x2-sl.x1, dy=sl.y2-sl.y1;
+  var lineLenPx=Math.sqrt(dx*dx+dy*dy);
+  if(lineLenPx<2) return;
+  var lineLenFt=lineLenPx/SS_GRID_PX_PER_FT;
+  var svgNS="http://www.w3.org/2000/svg";
+
+  // For each level, find rooms the section line passes through, and the
+  // [start,end] ft range along the line where each room is crossed.
+  var levelData=bdef.levels.map(function(lvlDef,li){
+    var items=bs.levels[li]||[];
+    var hits=[];
+    items.forEach(function(item){
+      var rx1=item.px||0, ry1=item.py||0, rx2=rx1+(item.gw||0), ry2=ry1+(item.gh||0);
+      // Liang-Barsky style clip of the line segment against the room rect
+      var t0=0, t1=1;
+      var p=[-(dx), dx, -(dy), dy];
+      var q=[sl.x1-rx1, rx2-sl.x1, sl.y1-ry1, ry2-sl.y1];
+      var rejected=false;
+      for(var i=0;i<4;i++){
+        if(p[i]===0){ if(q[i]<0){rejected=true;break;} }
+        else {
+          var r=q[i]/p[i];
+          if(p[i]<0){ if(r>t1){rejected=true;break;} if(r>t0)t0=r; }
+          else { if(r<t0){rejected=true;break;} if(r<t1)t1=r; }
+        }
+      }
+      if(!rejected && t0<t1){
+        hits.push({
+          item:item,
+          startFt:(t0*lineLenPx)/SS_GRID_PX_PER_FT,
+          endFt:(t1*lineLenPx)/SS_GRID_PX_PER_FT
+        });
+      }
+    });
+    return hits;
+  });
+
+  var anyHits=levelData.some(function(h){return h.length>0;});
+
+  var sectionPanel=el("div",{id:"ss-section-view",class:"card",style:"margin-top:10px;margin-bottom:0"});
+  var hdrRow=el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:6px"});
+  hdrRow.appendChild(el("h3",{style:"margin:0;font-size:14px"},["Section — "+bdef.name]));
+  hdrRow.appendChild(el("div",{style:"font-size:10px;color:#888;flex:1"},
+    ["Cut line length: "+Math.round(lineLenFt)+"′ · Looking in direction of tick marks · set level datums with the HT fields"]));
+  sectionPanel.appendChild(hdrRow);
+
+  if(!anyHits){
+    sectionPanel.appendChild(el("div",{style:"color:#aaa;font-size:12px;padding:20px;text-align:center"},
+      ["Section line doesn't cross any placed rooms on any level."]));
+    container.parentElement.insertBefore(sectionPanel, container.nextSibling);
+    return;
+  }
+
+  // SVG section: x = position along cut line (ft), y = height (ft, inverted)
+  var pxPerFtX=3.0, pxPerFtY=3.0;
+  var topHt=0;
+  bdef.levels.forEach(function(lvlDef,li){
+    var lh=bs.levelHeights[li]||0;
+    var tallest=(bs.levels[li]||[]).reduce(function(m,it){return Math.max(m,it.roomHeight||10);},10);
+    topHt=Math.max(topHt, lh+tallest);
+  });
+  var maxHeight=Math.max(30, Math.ceil((topHt+5)/10)*10);
+  var svgW=Math.max(200, lineLenFt*pxPerFtX+90);
+  var svgH=maxHeight*pxPerFtY+50;
+
+  var svg=document.createElementNS(svgNS,"svg");
+  svg.setAttribute("width",svgW);svg.setAttribute("height",svgH);
+  svg.style.cssText="background:#fafbfc;border:1px solid var(--line);border-radius:4px;display:block";
+
+  function fx(ft){ return 50+ft*pxPerFtX; }
+  function fy(ft){ return svgH-20-ft*pxPerFtY; }
+
+  // Ground line
+  var ground=document.createElementNS(svgNS,"line");
+  ground.setAttribute("x1",fx(0));ground.setAttribute("y1",fy(0));
+  ground.setAttribute("x2",fx(lineLenFt));ground.setAttribute("y2",fy(0));
+  ground.setAttribute("stroke","#1F2A44");ground.setAttribute("stroke-width","2");
+  svg.appendChild(ground);
+
+  // Y-axis height ticks (every 10ft)
+  for(var hft=0; hft<=maxHeight; hft+=10){
+    var ty=fy(hft);
+    var tickLine=document.createElementNS(svgNS,"line");
+    tickLine.setAttribute("x1",fx(0)-5);tickLine.setAttribute("y1",ty);
+    tickLine.setAttribute("x2",fx(0));tickLine.setAttribute("y2",ty);
+    tickLine.setAttribute("stroke","#999");tickLine.setAttribute("stroke-width","1");
+    svg.appendChild(tickLine);
+    var tickLbl=document.createElementNS(svgNS,"text");
+    tickLbl.setAttribute("x",fx(0)-8);tickLbl.setAttribute("y",ty+3);
+    tickLbl.setAttribute("font-size","9");tickLbl.setAttribute("fill","#999");tickLbl.setAttribute("text-anchor","end");
+    tickLbl.textContent=hft;
+    svg.appendChild(tickLbl);
+  }
+
+  // Level datum lines + room boxes
+  levelData.forEach(function(hits,li){
+    var lh=bs.levelHeights[li]||0;
+    var datumLn=document.createElementNS(svgNS,"line");
+    datumLn.setAttribute("x1",fx(0));datumLn.setAttribute("y1",fy(lh));
+    datumLn.setAttribute("x2",fx(lineLenFt));datumLn.setAttribute("y2",fy(lh));
+    datumLn.setAttribute("stroke","#bbb");datumLn.setAttribute("stroke-width","1");datumLn.setAttribute("stroke-dasharray","3,3");
+    svg.appendChild(datumLn);
+    var datumLbl=document.createElementNS(svgNS,"text");
+    datumLbl.setAttribute("x",fx(lineLenFt)+4);datumLbl.setAttribute("y",fy(lh)+3);
+    datumLbl.setAttribute("font-size","9");datumLbl.setAttribute("fill","#888");datumLbl.setAttribute("font-weight","700");
+    datumLbl.textContent=bdef.levels[li].label+" @ "+lh+"′";
+    svg.appendChild(datumLbl);
+
+    hits.forEach(function(h){
+      var roomH=h.item.roomHeight||10;
+      var x1=fx(h.startFt), x2=fx(h.endFt);
+      var y1=fy(lh+roomH), y2=fy(lh);
+      var rect=document.createElementNS(svgNS,"rect");
+      rect.setAttribute("x",Math.min(x1,x2));rect.setAttribute("y",y1);
+      rect.setAttribute("width",Math.max(1,Math.abs(x2-x1)));rect.setAttribute("height",Math.max(1,y2-y1));
+      rect.setAttribute("fill",h.item.catColor||"#ccc");
+      rect.setAttribute("stroke","rgba(0,0,0,0.35)");rect.setAttribute("stroke-width","1");
+      var title=document.createElementNS(svgNS,"title");
+      title.textContent=h.item.name+" ("+h.item.id+") — "+roomH+"′ tall";
+      rect.appendChild(title);
+      svg.appendChild(rect);
+      if(Math.abs(x2-x1)>30){
+        var lbl=document.createElementNS(svgNS,"text");
+        lbl.setAttribute("x",(x1+x2)/2);lbl.setAttribute("y",(y1+y2)/2+3);
+        lbl.setAttribute("font-size","8");lbl.setAttribute("fill","#1F2A44");lbl.setAttribute("text-anchor","middle");
+        lbl.textContent=h.item.id;
+        svg.appendChild(lbl);
+      }
+    });
+  });
+
+  // X-axis length label
+  var xLbl=document.createElementNS(svgNS,"text");
+  xLbl.setAttribute("x",fx(lineLenFt/2));xLbl.setAttribute("y",svgH-4);
+  xLbl.setAttribute("font-size","10");
+  xLbl.setAttribute("fill","#888");xLbl.setAttribute("text-anchor","middle");xLbl.setAttribute("font-weight","700");
+  xLbl.textContent=Math.round(lineLenFt)+"′ section length";
+  svg.appendChild(xLbl);
+
+  var svgWrap=el("div",{style:"overflow-x:auto"});
+  svgWrap.appendChild(svg);
+  sectionPanel.appendChild(svgWrap);
+
+  container.parentElement.insertBefore(sectionPanel, container.nextSibling);
 }
 
 // ====================================================================
@@ -1074,7 +1335,9 @@ function ssPrintBuildings(){
   BLDG_REGISTRY.forEach(function(b,bi){
     SS.activeBuilding=bi;
     buildBuildingPanel(bp);
-    blocks.push('<div class="bldg-block"><h2>'+escHtml(b.name)+'</h2>'+bp.innerHTML+'</div>');
+    var secEl=document.getElementById("ss-section-view");
+    var secHtml=secEl?secEl.outerHTML:"";
+    blocks.push('<div class="bldg-block"><h2>'+escHtml(b.name)+'</h2>'+bp.innerHTML+secHtml+'</div>');
   });
   SS.activeBuilding=saved;
   buildBuildingPanel(bp);
