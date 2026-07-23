@@ -153,6 +153,7 @@ function ssClassGrid(key){
       URL.revokeObjectURL(url);
       delete _ssClassPending[ck];
     }
+    ssTouch();
     if(state.tab==="scenarios"){
       var bp=document.getElementById("ss-bldg-panel"); if(bp) buildBuildingPanel(bp);
       var pp=document.getElementById("ss-prog-panel"); if(pp) buildBlocksPanel(pp);
@@ -210,6 +211,24 @@ function ssFloorMask(key, availSF){
     }
   }
   interior=rec;
+  // Corner pass: a blocked cell wedged between two placeable cells (a convex
+  // corner of the outline) becomes placeable — removes one-cell corner dents
+  // without advancing straight walls.
+  var rec2=new Uint8Array(interior);
+  for(var ky=0;ky<H;ky++){
+    for(var kx=0;kx<W;kx++){
+      var kp=ky*W+kx;
+      if(interior[kp]||ext[kp]) continue;
+      if((kx===0||ext[kp-1])||(kx===W-1||ext[kp+1])||(ky===0||ext[kp-W])||(ky===H-1||ext[kp+W])) continue;
+      var kInt=0;
+      if(kx>0&&interior[kp-1])kInt++;
+      if(kx<W-1&&interior[kp+1])kInt++;
+      if(ky>0&&interior[kp-W])kInt++;
+      if(ky<H-1&&interior[kp+W])kInt++;
+      if(kInt>=2) rec2[kp]=1;
+    }
+  }
+  interior=rec2;
   // Despeckle: lone blocked cells (dashed-line crossings etc.) surrounded by
   // placeable area become placeable — removes pinholes and edge notches.
   for(var pass=0;pass<2;pass++){
@@ -321,88 +340,139 @@ function ssNearestFree(mask,taken,sx,sy){
   return -1;
 }
 
-// Compute the fill regions for all blocks placed on one level.
-// Returns [{item, cells, runs, bbox, centroid, gsf, fitGSF, truncated}], in item order.
-function ssComputeFills(bdef, bs, li){
-  var lvlDef=bdef.floors[li];
-  var key=ssPlanKey(lvlDef.plan);
-  var mask=ssFloorMask(key, lvlDef.avail_sf);
-  var items=bs.levels[li]||[];
-  var out=[];
-  if(!mask){ items.forEach(function(it){ out.push({item:it,cells:[],runs:[],bbox:null,centroid:null,gsf:ssBlockGSF(it.catId,it.factor),fitGSF:0,truncated:true}); }); return out; }
+// ── Global fill computation with remainder accounting ────────────────────
+// Fills are computed for the WHOLE scenario in building → level → item
+// order, tracking how much of each block is already consumed. A block can
+// therefore be split across floors: a placement takes what fits, and the
+// remainder stays in the Program Blocks panel, draggable to another floor.
+function ssTouch(){ SS._rev++; SS._fillsCache=null; }
+
+function ssFillOne(mask, key, taken, item, needCells){
   var W=mask.W,H=mask.H;
-  var taken=new Uint8Array(W*H);
-  items.forEach(function(item){
-    var gsf=ssBlockGSF(item.catId,item.factor);
-    var need=Math.max(1,Math.round(gsf/mask.cellSF));
+  var cells=[];
+  if(needCells>0){
     var su=isFinite(item.su)?item.su:FLOOR_SVGS[key].vb[2]/2;
     var sv=isFinite(item.sv)?item.sv:FLOOR_SVGS[key].vb[3]/2;
     var sx=Math.max(0,Math.min(W-1,Math.round(su/mask.upc)));
     var sy=Math.max(0,Math.min(H-1,Math.round(sv/mask.upc)));
     var seedIdx=ssNearestFree(mask,taken,sx,sy);
-    if(seedIdx<0){
-      out.push({item:item,cells:[],runs:[],bbox:null,centroid:null,gsf:gsf,fitGSF:0,truncated:true});
-      return;
-    }
-    var s0x=seedIdx%W, s0y=(seedIdx-s0x)/W;
-    // Chebyshev-priority growth
-    var cells=[];
-    var inQ=new Uint8Array(W*H);
-    var heap=[]; ssHeapPush(heap,0,seedIdx); inQ[seedIdx]=1;
-    while(cells.length<need && heap.length){
-      var p=ssHeapPop(heap)[1];
-      cells.push(p); taken[p]=1;
-      var cx=p%W, cy=(p-cx)/W;
-      var nb=[];
-      if(cx>0)nb.push(p-1); if(cx<W-1)nb.push(p+1);
-      if(cy>0)nb.push(p-W); if(cy<H-1)nb.push(p+W);
-      for(var i=0;i<nb.length;i++){
-        var n=nb[i];
-        if(inQ[n]||!mask.interior[n]||taken[n]) continue;
-        inQ[n]=1;
-        var nx=n%W, ny=(n-nx)/W;
-        var dxx=Math.abs(nx-s0x), dyy=Math.abs(ny-s0y);
-        // Chebyshev rings; row-major within a ring so a partial final ring
-        // fills top-to-bottom and leaves one clean edge instead of jagged bumps
-        ssHeapPush(heap, Math.max(dxx,dyy)*1e7+(ny*W+nx), n);
+    if(seedIdx>=0){
+      var s0x=seedIdx%W, s0y=(seedIdx-s0x)/W;
+      var inQ=new Uint8Array(W*H);
+      var heap=[]; ssHeapPush(heap,0,seedIdx); inQ[seedIdx]=1;
+      while(cells.length<needCells && heap.length){
+        var p=ssHeapPop(heap)[1];
+        cells.push(p); taken[p]=1;
+        var cx=p%W, cy=(p-cx)/W;
+        var nb=[];
+        if(cx>0)nb.push(p-1); if(cx<W-1)nb.push(p+1);
+        if(cy>0)nb.push(p-W); if(cy<H-1)nb.push(p+W);
+        for(var i=0;i<nb.length;i++){
+          var n=nb[i];
+          if(inQ[n]||!mask.interior[n]||taken[n]) continue;
+          inQ[n]=1;
+          var nx=n%W, ny=(n-nx)/W;
+          var dxx=Math.abs(nx-s0x), dyy=Math.abs(ny-s0y);
+          // Chebyshev rings; row-major within a ring so a partial final ring
+          // fills top-to-bottom and leaves one clean edge, not jagged bumps
+          ssHeapPush(heap, Math.max(dxx,dyy)*1e7+(ny*W+nx), n);
+        }
       }
     }
-    // Row RLE runs + bbox + centroid
-    var byRow={}, minX=1e9,minY=1e9,maxX=-1,maxY=-1, sumX=0,sumY=0;
-    cells.forEach(function(p){
-      var cx2=p%W, cy2=(p-cx2)/W;
-      (byRow[cy2]=byRow[cy2]||[]).push(cx2);
-      if(cx2<minX)minX=cx2; if(cx2>maxX)maxX=cx2;
-      if(cy2<minY)minY=cy2; if(cy2>maxY)maxY=cy2;
-      sumX+=cx2; sumY+=cy2;
+  }
+  // Row RLE runs + bbox + centroid + perimeter edges
+  var byRow={}, minX=1e9,minY=1e9,maxX=-1,maxY=-1, sumX=0,sumY=0;
+  cells.forEach(function(p){
+    var cx2=p%W, cy2=(p-cx2)/W;
+    (byRow[cy2]=byRow[cy2]||[]).push(cx2);
+    if(cx2<minX)minX=cx2; if(cx2>maxX)maxX=cx2;
+    if(cy2<minY)minY=cy2; if(cy2>maxY)maxY=cy2;
+    sumX+=cx2; sumY+=cy2;
+  });
+  var runs=[];
+  Object.keys(byRow).forEach(function(rk){
+    var row=byRow[rk].sort(function(a,b){return a-b;});
+    var y=+rk, st=row[0], prev=row[0];
+    for(var i2=1;i2<=row.length;i2++){
+      if(i2<row.length && row[i2]===prev+1){ prev=row[i2]; continue; }
+      runs.push({y:y,x0:st,x1:prev});
+      if(i2<row.length){ st=row[i2]; prev=row[i2]; }
+    }
+  });
+  var inRegion=new Uint8Array(W*H);
+  cells.forEach(function(p){ inRegion[p]=1; });
+  var edges=[];
+  cells.forEach(function(p){
+    var cx3=p%W, cy3=(p-cx3)/W;
+    if(cx3===0||!inRegion[p-1])   edges.push([cx3,cy3,cx3,cy3+1]);
+    if(cx3===W-1||!inRegion[p+1]) edges.push([cx3+1,cy3,cx3+1,cy3+1]);
+    if(cy3===0||!inRegion[p-W])   edges.push([cx3,cy3,cx3+1,cy3]);
+    if(cy3===H-1||!inRegion[p+W]) edges.push([cx3,cy3+1,cx3+1,cy3+1]);
+  });
+  return {
+    item:item, cells:cells, runs:runs, edges:edges,
+    bbox:cells.length?{x0:minX,y0:minY,x1:maxX+1,y1:maxY+1}:null,
+    centroid:cells.length?[sumX/cells.length+0.5, sumY/cells.length+0.5]:null
+  };
+}
+
+function ssComputeAllFills(){
+  var sc=ssScenario();
+  if(SS._fillsCache && SS._fillsCache.rev===SS._rev && SS._fillsCache.scen===SS.activeScenario) return SS._fillsCache;
+  var byLevel={}, consumed={};
+  sc.buildings.forEach(function(bs,bi){
+    var bdef=S.buildings[bi]; if(!bdef) return;
+    bdef.floors.forEach(function(lvlDef,li){
+      var key=ssPlanKey(lvlDef.plan);
+      var mask=ssFloorMask(key, lvlDef.avail_sf);
+      var items=bs.levels[li]||[];
+      var fills=[];
+      var taken=mask?new Uint8Array(mask.W*mask.H):null;
+      items.forEach(function(item){
+        var blockGSF=ssBlockGSF(item.catId,item.factor);
+        var remaining=Math.max(0, blockGSF-(consumed[item.id]||0));
+        if(!mask){
+          fills.push({item:item,cells:[],runs:[],edges:[],bbox:null,centroid:null,
+            gsf:blockGSF,portionGSF:0,fitGSF:0,wantedGSF:remaining,truncated:remaining>0});
+          return;
+        }
+        var needCells=Math.round(remaining/mask.cellSF);
+        var f=ssFillOne(mask, key, taken, item, needCells);
+        f.gsf=blockGSF;
+        f.portionGSF=f.cells.length*mask.cellSF;
+        f.fitGSF=f.portionGSF;
+        f.wantedGSF=remaining;
+        f.truncated=f.cells.length<needCells;
+        consumed[item.id]=(consumed[item.id]||0)+f.portionGSF;
+        fills.push(f);
+      });
+      byLevel[bi+":"+li]=fills;
     });
-    var runs=[];
-    Object.keys(byRow).forEach(function(rk){
-      var row=byRow[rk].sort(function(a,b){return a-b;});
-      var y=+rk, st=row[0], prev=row[0];
-      for(var i2=1;i2<=row.length;i2++){
-        if(i2<row.length && row[i2]===prev+1){ prev=row[i2]; continue; }
-        runs.push({y:y,x0:st,x1:prev});
-        if(i2<row.length){ st=row[i2]; prev=row[i2]; }
-      }
-    });
-    // Perimeter edges (cell-boundary segments where neighbor is outside the region)
-    var inRegion=new Uint8Array(W*H);
-    cells.forEach(function(p){ inRegion[p]=1; });
-    var edges=[];
-    cells.forEach(function(p){
-      var cx3=p%W, cy3=(p-cx3)/W;
-      if(cx3===0||!inRegion[p-1])   edges.push([cx3,cy3,cx3,cy3+1]);
-      if(cx3===W-1||!inRegion[p+1]) edges.push([cx3+1,cy3,cx3+1,cy3+1]);
-      if(cy3===0||!inRegion[p-W])   edges.push([cx3,cy3,cx3+1,cy3]);
-      if(cy3===H-1||!inRegion[p+W]) edges.push([cx3,cy3+1,cx3+1,cy3+1]);
-    });
-    out.push({
-      item:item, cells:cells, runs:runs, edges:edges,
-      bbox:cells.length?{x0:minX,y0:minY,x1:maxX+1,y1:maxY+1}:null,
-      centroid:cells.length?[sumX/cells.length+0.5, sumY/cells.length+0.5]:null,
-      gsf:gsf, fitGSF:cells.length*mask.cellSF,
-      truncated:cells.length<need
+  });
+  SS._fillsCache={rev:SS._rev, scen:SS.activeScenario, byLevel:byLevel, consumed:consumed};
+  return SS._fillsCache;
+}
+function ssBlockConsumed(blockId){ return ssComputeAllFills().consumed[blockId]||0; }
+// Per-level slice (kept as the common accessor for panels + section view)
+function ssComputeFills(bdef, bs, li){
+  var bi=-1;
+  for(var i=0;i<S.buildings.length;i++){ if(S.buildings[i].id===bdef.id){bi=i;break;} }
+  return ssComputeAllFills().byLevel[bi+":"+li]||[];
+}
+// All placements of one block: [{bi, li, portion}]
+function ssBlockPlacements(blockId){
+  var sc=ssScenario(), out=[];
+  var af=ssComputeAllFills();
+  sc.buildings.forEach(function(bs,bi){
+    bs.levels.forEach(function(lvl,li){
+      lvl.forEach(function(it){
+        if(it.id===blockId){
+          var fills=af.byLevel[bi+":"+li]||[];
+          var f=null;
+          for(var i=0;i<fills.length;i++){ if(fills[i].item===it){f=fills[i];break;} }
+          out.push({bi:bi, li:li, portion:f?f.portionGSF:0});
+        }
+      });
     });
   });
   return out;
@@ -443,7 +513,10 @@ var SS = {
   activeScenario: 0,
   activeBuilding: 0,
   scenarios: [ssNewScenario("Scenario 1")],
-  _sectionDrawMode: false
+  _sectionDrawMode: false,
+  _rev: 1,
+  _fillsCache: null,
+  _pidSeq: 1
 };
 
 function ssNormalizeScenario(sc){
@@ -458,6 +531,7 @@ function ssNormalizeScenario(sc){
     bs.levelPan    =(bs.levelPan||[]).slice(0,n);    while(bs.levelPan.length<n)    bs.levelPan.push([0,0]);
     bs.levelHeights=(bs.levelHeights||[]).slice(0,n);while(bs.levelHeights.length<n)bs.levelHeights.push(bs.levelHeights.length*14);
     if(bs.sectionLine===undefined) bs.sectionLine=null;
+    bs.levels.forEach(function(lvl){ lvl.forEach(function(it){ if(!it.pid) it.pid=it.id+"~m"+(SS._pidSeq++); }); });
     return bs;
   });
   return sc;
@@ -483,21 +557,23 @@ function ssBadgeFor(asgn){
 }
 
 function ssPlacedGSFForLevel(bldgId, li){
-  var sc=ssScenario();
-  for(var bi=0;bi<sc.buildings.length;bi++){
-    if(sc.buildings[bi].id===bldgId){
-      return (sc.buildings[bi].levels[li]||[]).reduce(function(s,it){return s+ssBlockGSF(it.catId,it.factor);},0);
+  var af=ssComputeAllFills();
+  for(var bi=0;bi<S.buildings.length;bi++){
+    if(S.buildings[bi].id===bldgId){
+      return (af.byLevel[bi+":"+li]||[]).reduce(function(s,f){return s+f.portionGSF;},0);
     }
   }
   return 0;
 }
 function ssPlacedGSFForBuilding(bldgId){
-  var sc=ssScenario();
-  for(var bi=0;bi<sc.buildings.length;bi++){
-    if(sc.buildings[bi].id===bldgId){
-      return sc.buildings[bi].levels.reduce(function(s,lvl){
-        return s+lvl.reduce(function(t,it){return t+ssBlockGSF(it.catId,it.factor);},0);
-      },0);
+  var af=ssComputeAllFills();
+  for(var bi=0;bi<S.buildings.length;bi++){
+    if(S.buildings[bi].id===bldgId){
+      var t=0;
+      S.buildings[bi].floors.forEach(function(f2,li){
+        (af.byLevel[bi+":"+li]||[]).forEach(function(f){ t+=f.portionGSF; });
+      });
+      return t;
     }
   }
   return 0;
@@ -508,6 +584,7 @@ function ssPlacedGSFForBuilding(bldgId){
 // ====================================================================
 function tabScenarios(){
   ssNormalizeScenario(ssScenario());
+  ssTouch();   // program-tab edits may have changed block GSFs
   // kick off floor plan rasterization for every level (async, cached)
   S.buildings.forEach(function(b){ b.floors.forEach(function(f){ ssClassGrid(ssPlanKey(f.plan)); }); });
   var outer=el("div",{style:"display:flex;flex-direction:column;gap:0"});
@@ -600,32 +677,47 @@ function buildBlocksPanel(container){
       body.appendChild(el("div",{style:"font-size:11px;color:var(--faint);font-style:italic"},["No blocks — click + to add one."]));
     }
     instances.forEach(function(block){
-      var asgn=ssAssignmentOf(block.id);
-      var assigned=asgn!==null;
       var gsf=ssBlockGSF(block.catId, block.factor);
+      var consumed=Math.min(gsf, ssBlockConsumed(block.id));
+      var remaining=Math.max(0, gsf-consumed);
+      var placements=ssBlockPlacements(block.id);
+      var canDrag=remaining>=50;
       // True-to-area swatch: on-screen area ∝ GSF (dims ∝ √GSF, no minimum
       // clamp), so a ×0.3 block really reads as 30% of the ×1 block's area.
+      // The placed portion fades out; the solid part is the draggable rest.
       var SCALE=0.55;
       var dw=Math.max(8,Math.round(Math.sqrt(Math.max(1,gsf)*SS_BLOCK_AR)*SCALE));
       var dh=Math.max(6,Math.round(Math.sqrt(Math.max(1,gsf)/SS_BLOCK_AR)*SCALE));
 
       var row=el("div",{
         "data-block-id":block.id,
-        draggable:assigned?"false":"true",
-        title:cat.name+" × "+block.factor+" — "+fmt(gsf)+" GSF"+(assigned?" (placed)":""),
+        draggable:canDrag?"true":"false",
+        title:cat.name+" × "+block.factor+" — "+fmt(gsf)+" GSF"+
+          (consumed>0?" · placed "+fmt(consumed)+" · left "+fmt(remaining):"")+
+          (canDrag?(consumed>0?" — drag to place the remainder":""):" (fully placed)"),
         style:[
           "display:flex","align-items:center","gap:8px",
-          "cursor:"+(assigned?"default":"grab"),
-          "opacity:"+(assigned?"0.45":"1"),
+          "cursor:"+(canDrag?"grab":"default"),
           "padding:2px 0","user-select:none"
         ].join(";")
       });
-      row.appendChild(el("div",{style:[
-        "width:"+dw+"px","height:"+dh+"px","flex-shrink:0",
+      var sw=el("div",{style:[
+        "position:relative","width:"+dw+"px","height:"+dh+"px","flex-shrink:0",
         "background:"+cat.color,
         "border:1.5px solid "+darkenColor(cat.color,0.3),
-        "box-sizing:border-box"
-      ].join(";")}));
+        "box-sizing:border-box","overflow:hidden"
+      ].join(";")});
+      if(consumed>0){
+        // faded left portion = area already placed on floors
+        var placedFrac=Math.min(1, consumed/gsf);
+        sw.appendChild(el("div",{style:[
+          "position:absolute","left:0","top:0","bottom:0",
+          "width:"+(placedFrac*100)+"%",
+          "background:rgba(255,255,255,0.7)",
+          "border-right:1.5px dashed "+darkenColor(cat.color,0.4)
+        ].join(";")}));
+      }
+      row.appendChild(sw);
 
       var info=el("div",{style:"flex:1;min-width:0;display:flex;flex-direction:column;gap:1px"});
       var lblRow=el("div",{style:"display:flex;align-items:center;gap:4px;flex-wrap:wrap"});
@@ -633,25 +725,39 @@ function buildBlocksPanel(container){
       var fInp=el("input",{
         type:"text",value:String(block.factor),
         title:"Scale factor for this block",
-        style:"width:34px;font-size:12px;font-weight:900;border:1px solid rgba(35,48,68,.35);background:#fff;padding:1px 3px;text-align:center;font-family:inherit;color:#233044"+(assigned?";pointer-events:none;opacity:.6":"")
+        style:"width:34px;font-size:12px;font-weight:900;border:1px solid rgba(35,48,68,.35);background:#fff;padding:1px 3px;text-align:center;font-family:inherit;color:#233044"
       });
       fInp.addEventListener("change",function(){
         var v=parseFloat(fInp.value.replace(/[^0-9.]/g,""));
         block.factor=(isNaN(v)||v<=0)?1:Math.round(v*100)/100;
+        ssTouch();
         buildBlocksPanel(container);
+        var bp=document.getElementById("ss-bldg-panel");if(bp)buildBuildingPanel(bp);
+        var sp=document.getElementById("ss-site-panel");if(sp)buildSitePanel(sp);
       });
       fInp.addEventListener("mousedown",function(e){e.stopPropagation();});
       lblRow.appendChild(fInp);
-      lblRow.appendChild(el("span",{style:"font-size:11px;font-weight:800;color:#233044"},[fmt(gsf)+" GSF"]));
-      if(assigned){
-        lblRow.appendChild(el("span",{style:"background:#233044;color:#fff;font-size:8px;font-weight:800;border-radius:5px;padding:0 5px;line-height:12px"},[ssBadgeFor(asgn)]));
+      if(consumed>0){
+        lblRow.appendChild(el("span",{style:"font-size:11px;font-weight:800;color:#233044"},
+          [fmt(remaining)+" GSF left"]));
+        lblRow.appendChild(el("span",{style:"font-size:9px;color:var(--faint)"},["of "+fmt(gsf)]));
+      } else {
+        lblRow.appendChild(el("span",{style:"font-size:11px;font-weight:800;color:#233044"},[fmt(gsf)+" GSF"]));
       }
       info.appendChild(lblRow);
+      if(placements.length){
+        var bRow=el("div",{style:"display:flex;gap:3px;flex-wrap:wrap;align-items:center"});
+        placements.forEach(function(pl){
+          bRow.appendChild(el("span",{style:"background:#233044;color:#fff;font-size:8px;font-weight:800;border-radius:5px;padding:0 5px;line-height:12px"},
+            [ssBadgeFor(pl)+" "+fmt(pl.portion)]));
+        });
+        info.appendChild(bRow);
+      }
       var stats=ssBlockStats(block.catId, block.factor);
       if(stats) info.appendChild(el("div",{style:"font-size:9px;color:var(--mut);line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"},[stats]));
       row.appendChild(info);
 
-      if(!assigned){
+      if(!placements.length){
         row.appendChild(el("button",{
           title:"Remove this block",
           style:"width:15px;height:15px;border-radius:50%;border:1px solid #C0392B66;background:#fff;color:#C0392B;font-size:9px;cursor:pointer;line-height:1;padding:0;flex-shrink:0",
@@ -662,6 +768,8 @@ function buildBlocksPanel(container){
             buildBlocksPanel(container);
           }
         },["✕"]));
+      }
+      if(canDrag){
         row.addEventListener("dragstart",function(e){
           e.dataTransfer.effectAllowed="move";
           e.dataTransfer.setData("text/plain",JSON.stringify({isBlock:true,id:block.id,catId:block.catId,factor:block.factor}));
@@ -674,7 +782,7 @@ function buildBlocksPanel(container){
 
     // Category placement summary
     var totalGSF=instances.reduce(function(s,b){return s+ssBlockGSF(b.catId,b.factor);},0);
-    var placedGSF=instances.reduce(function(s,b){return s+(ssIsAssigned(b.id)?ssBlockGSF(b.catId,b.factor):0);},0);
+    var placedGSF=instances.reduce(function(s,b){return s+Math.min(ssBlockGSF(b.catId,b.factor), ssBlockConsumed(b.id));},0);
     body.appendChild(el("div",{style:"font-size:10px;color:var(--mut);border-top:1px solid var(--line);padding-top:6px"},[
       instances.length+" block"+(instances.length===1?"":"s")+" · "+fmt(totalGSF)+" GSF · placed "+fmt(placedGSF)+" · unplaced "+fmt(totalGSF-placedGSF)
     ]));
@@ -686,7 +794,7 @@ function buildBlocksPanel(container){
   var allTotal=0, allPlaced=0;
   sc.blocks.forEach(function(b){
     var g=ssBlockGSF(b.catId,b.factor);
-    allTotal+=g; if(ssIsAssigned(b.id)) allPlaced+=g;
+    allTotal+=g; allPlaced+=Math.min(g, ssBlockConsumed(b.id));
   });
   var cap=0, capReady=true;
   S.buildings.forEach(function(b){ b.floors.forEach(function(f){
@@ -762,7 +870,7 @@ function buildBuildingPanel(container){
   bdef.floors.forEach(function(lvlDef,li){
     var items=bs.levels[li];
     var plate=floorSF(lvlDef.units2);
-    var lvlGSF=items.reduce(function(s,it){return s+ssBlockGSF(it.catId,it.factor);},0);
+    var lvlGSF=0;   // set from the computed fill portions below
     var lz=bs.levelZoom[li]||ssFitZoom(bdef);
     var scaledCanvas=Math.round(worldPx0*lz);
 
@@ -819,6 +927,7 @@ function buildBuildingPanel(container){
     // Placed blocks — smart-filled regions that hug the floor outline
     var lvlMask=ssFloorMask(ssPlanKey(lvlDef.plan), lvlDef.avail_sf);
     var fills=ssComputeFills(bdef, bs, li);
+    lvlGSF=fills.reduce(function(s,f){return s+f.portionGSF;},0);
     var cellPx=SS_MASK_FT*SS_GRID_PX_PER_FT*lz;   // display px per mask cell
     var fox=0, foy=0;
     if(fp){
@@ -866,14 +975,17 @@ function buildBuildingPanel(container){
     fills.forEach(function(f,ii){
       var item=f.item;
       if(!f.bbox){
-        // Block couldn't get any cells (no free area) — show a removable warning chip
+        // Placement got no cells — either the floor is full or the block has
+        // nothing left to place here. Show a removable warning chip.
         var cat0=ssCat(item.catId);
+        var reason=(f.wantedGSF<=0)?"nothing left of this block":"no room on this floor";
         var chip=el("div",{style:"position:absolute;left:4px;top:"+(4+noFitCount*20)+"px;z-index:20;background:#fff;border:1px solid #C0392B;color:#C0392B;font-size:9px;font-weight:800;padding:1px 5px;display:flex;align-items:center;gap:5px"},
-          ["⚠ "+(cat0?cat0.name:item.catId)+" ×"+item.factor+" — no room",
+          ["⚠ "+(cat0?cat0.name:item.catId)+" ×"+item.factor+" — "+reason,
            el("span",{style:"cursor:pointer;font-weight:900",onclick:function(ev){
              ev.stopPropagation();
              var idx=items.indexOf(item);
              if(idx>=0) items.splice(idx,1);
+             ssTouch();
              var pp=document.getElementById("ss-prog-panel");if(pp)buildBlocksPanel(pp);
              buildBuildingPanel(container);
            }},["✕"])]);
@@ -886,8 +998,10 @@ function buildBuildingPanel(container){
       var bw=(f.bbox.x1-f.bbox.x0)*cellPx, bh=(f.bbox.y1-f.bbox.y0)*cellPx;
       var bx=fox+f.bbox.x0*cellPx, by=foy+f.bbox.y0*cellPx;
 
+      var isPartial=f.portionGSF < f.gsf-40;
       var rEl=el("div",{
-        title:(cat?cat.name:item.catId)+" × "+item.factor+" | "+fmt(f.gsf)+" GSF"+(f.truncated?" — ⚠ only "+fmt(f.fitGSF)+" GSF fits here":""),
+        title:(cat?cat.name:item.catId)+" × "+item.factor+
+          (isPartial?" | part: "+fmt(f.portionGSF)+" of "+fmt(f.gsf)+" GSF"+(f.truncated?" — floor full, remainder stays in the Program panel":""):" | "+fmt(f.gsf)+" GSF"),
         style:[
           "position:absolute","left:"+bx+"px","top:"+by+"px",
           "width:"+bw+"px","height:"+bh+"px",
@@ -926,9 +1040,9 @@ function buildBuildingPanel(container){
         var lxPct=((f.centroid[0]-f.bbox.x0)/(f.bbox.x1-f.bbox.x0))*100;
         var lyPct=((f.centroid[1]-f.bbox.y0)/(f.bbox.y1-f.bbox.y0))*100;
         rEl.appendChild(el("div",{style:"position:absolute;left:"+lxPct+"%;top:"+lyPct+"%;transform:translate(-50%,-50%);font-size:9px;font-weight:800;color:#233044;pointer-events:none;text-align:center;line-height:1.25;text-shadow:0 0 3px #fff,0 0 3px #fff,0 0 4px #fff;white-space:nowrap"},
-          [(cat?cat.name:item.catId)+" ×"+item.factor,
+          [(cat?cat.name:item.catId)+" ×"+item.factor+(isPartial?" (part)":""),
            el("br"),
-           fmt(f.gsf)+" GSF"+(f.truncated?" ⚠":"")]));
+           (isPartial?fmt(f.portionGSF)+" / "+fmt(f.gsf):fmt(f.gsf))+" GSF"+(f.truncated?" ⚠":"")]));
       }
 
       var delBtn=el("div",{
@@ -938,6 +1052,7 @@ function buildBuildingPanel(container){
           e.stopPropagation();e.preventDefault();
           var idx=items.indexOf(item);
           if(idx>=0) items.splice(idx,1);
+          ssTouch();
           var pp=document.getElementById("ss-prog-panel");if(pp)buildBlocksPanel(pp);
           buildBuildingPanel(container);
           var sp=document.getElementById("ss-site-panel");if(sp)buildSitePanel(sp);
@@ -953,7 +1068,7 @@ function buildBuildingPanel(container){
         if(e.target===delBtn){e.preventDefault();return;}
         e.dataTransfer.effectAllowed="move";
         e.dataTransfer.setData("text/plain",JSON.stringify({
-          id:item.id,
+          pid:item.pid, id:item.id,
           fromBuilding:SS.activeBuilding,fromLevel:li,
           isBuildingMove:true
         }));
@@ -1086,7 +1201,7 @@ function buildBuildingPanel(container){
         var srcB=ssScenario().buildings[data.fromBuilding];
         if(!srcB) return;
         var srcItems=srcB.levels[data.fromLevel];
-        var srcIdx=srcItems.findIndex(function(it){return it.id===data.id;});
+        var srcIdx=srcItems.findIndex(function(it){return it.pid===data.pid;});
         if(srcIdx<0) return;
         if(data.fromBuilding===SS.activeBuilding && data.fromLevel===li){
           srcItems[srcIdx].su=seed.su; srcItems[srcIdx].sv=seed.sv;
@@ -1096,13 +1211,17 @@ function buildBuildingPanel(container){
           items.push(moved);
         }
       } else if(data.isBlock){
-        if(ssIsAssigned(data.id)) return;
+        var blockGSF=ssBlockGSF(data.catId, data.factor);
+        var remaining=blockGSF-ssBlockConsumed(data.id);
+        if(remaining<50){ alert("This block is already fully placed — delete one of its placed portions first."); return; }
         items.push({
+          pid:data.id+"~"+(SS._pidSeq++),
           id:data.id, catId:data.catId, factor:data.factor,
           su:seed.su, sv:seed.sv,
           roomHeight:SS_BLOCK_HT
         });
       } else return;
+      ssTouch();
 
       var pp=document.getElementById("ss-prog-panel");if(pp)buildBlocksPanel(pp);
       buildBuildingPanel(container);
@@ -1159,6 +1278,7 @@ function buildBuildingPanel(container){
       aInp.addEventListener("change",function(){
         var v=parseFloat(aInp.value.replace(/[^0-9.]/g,""));
         lvlDef.avail_sf=(isNaN(v)||v<0)?0:Math.round(v);
+        ssTouch();
         buildBuildingPanel(container);
         var pp=document.getElementById("ss-prog-panel");if(pp)buildBlocksPanel(pp);
         var sp=document.getElementById("ss-site-panel");if(sp)buildSitePanel(sp);
@@ -1255,7 +1375,7 @@ function buildSectionView(container, bdef, bs){
       }
       merged.forEach(function(iv){
         hits.push({
-          item:f.item, gsf:f.gsf,
+          item:f.item, gsf:f.portionGSF,
           startFt:(iv[0]*lineLenPx)/SS_GRID_PX_PER_FT,
           endFt:(iv[1]*lineLenPx)/SS_GRID_PX_PER_FT
         });
@@ -1579,6 +1699,7 @@ function ssImportScenarios(evt){
       if(confirm(msg+"\n\nReplace current scenarios?")){
         SS.scenarios=data.scenarios.map(ssNormalizeScenario);
         SS.activeScenario=0;SS.activeBuilding=0;
+        ssTouch();
         renderSiteTab();
       }
     }catch(err){alert("JSON parse error: "+err.message);}
