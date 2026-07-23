@@ -880,7 +880,7 @@ function buildBuildingPanel(container){
 
   var legendRow=el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap"});
   legendRow.appendChild(el("div",{class:"hint",style:"margin:0;flex:1;min-width:200px"},
-    [gridFt+"′ canvas · grid = "+SS_GRID_DIV+"′ · scroll or +/− to zoom · dropped blocks auto-fill the usable floor area keeping their GSF ("+SS_MASK_FT+"′ cells) · grey = unusable · drag a placed block to re-flow it · hover for × delete"]));
+    [gridFt+"′ canvas · grid = "+SS_GRID_DIV+"′ · scroll or +/− to zoom · dropped blocks auto-fill the usable floor area keeping their GSF ("+SS_MASK_FT+"′ cells) · grey = unusable · drag a placed block to re-flow it · double-click (or hover ×) to remove"]));
   // Section draw toggle
   if(!SS._sectionDrawMode) SS._sectionDrawMode=false;
   legendRow.appendChild(el("button",{
@@ -1113,6 +1113,17 @@ function buildBuildingPanel(container){
       rEl.addEventListener("mouseenter",function(){delBtn.style.display="block";});
       rEl.addEventListener("mouseleave",function(){delBtn.style.display="none";});
       rEl.appendChild(delBtn);
+
+      // Double-click a placed region to remove it (area returns to the panel)
+      rEl.addEventListener("dblclick",function(e){
+        e.stopPropagation();e.preventDefault();
+        var idx=items.indexOf(item);
+        if(idx>=0) items.splice(idx,1);
+        ssTouch();
+        var pp=document.getElementById("ss-prog-panel");if(pp)buildBlocksPanel(pp);
+        buildBuildingPanel(container);
+        var sp=document.getElementById("ss-site-panel");if(sp)buildSitePanel(sp);
+      });
 
       // Drag to re-seed (same level, other level, or other building)
       rEl.setAttribute("draggable","true");
