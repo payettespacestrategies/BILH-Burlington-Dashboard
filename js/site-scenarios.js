@@ -48,7 +48,7 @@ var SS_SITE_META = {
 
 // ── Lease Timeline (67 South Bedford only — the only plan whose SVG has
 // colored lease zones baked in; other buildings' plans are grey/white only) ──
-var LEASE_TIMELINE_START = 2026, LEASE_TIMELINE_END = 2050;
+var LEASE_TIMELINE_START = 2026, LEASE_TIMELINE_END = 2035;
 var LEASE_DEFS = [
   {color:"#4e76ba", label:"Lease 1"},
   {color:"#fbb35e", label:"Lease 2"},
@@ -1001,21 +1001,23 @@ function buildLeaseTimeline(container, bdef, bs, sc){
     ["Drag a lease's edges to resize it, its middle to move it, or the flag to change the current year — a lease's floor area is blocked until it ends, then opens up for program."]));
   wrap.appendChild(hdrRow);
 
-  var TL_W=Math.max(480, Math.min(900,(container.clientWidth||760)-44));
-  var TL_ROWH=25, TL_TOP=20, TL_H=TL_TOP+TL_ROWH*LEASE_DEFS.length+18;
+  var LBL_W=54;   // left label column ("Lease 1" / "Year")
+  var TL_W=Math.max(380, (container.clientWidth||700)-44);
+  var TIMELINE_W=TL_W-LBL_W;
+  var TL_ROWH=25, TL_TOP=6, TL_H=TL_TOP+TL_ROWH*LEASE_DEFS.length+18;
   var span=LEASE_TIMELINE_END-LEASE_TIMELINE_START;
-  function yx(yr){ return (yr-LEASE_TIMELINE_START)/span*TL_W; }
+  function yx(yr){ return LBL_W+(yr-LEASE_TIMELINE_START)/span*TIMELINE_W; }
 
-  var tlOuter=el("div",{style:"overflow-x:auto"});
   var tl=el("div",{style:"position:relative;width:"+TL_W+"px;height:"+TL_H+"px;user-select:none"});
 
-  // Year gridlines every 2 years, labeled every 4
-  for(var yr=LEASE_TIMELINE_START; yr<=LEASE_TIMELINE_END; yr+=2){
+  // "Year" row label, left column, aligned with the tick-label row
+  tl.appendChild(el("div",{style:"position:absolute;left:0;width:"+(LBL_W-8)+"px;bottom:0;font-size:9px;font-weight:800;color:var(--faint);text-align:right"},["Year"]));
+
+  // Year gridlines + labels — every year, abbreviated to 2 digits
+  for(var yr=LEASE_TIMELINE_START; yr<=LEASE_TIMELINE_END; yr++){
     var gx=yx(yr);
     tl.appendChild(el("div",{style:"position:absolute;left:"+gx+"px;top:"+TL_TOP+"px;bottom:14px;width:1px;background:var(--line)"}));
-    if((yr-LEASE_TIMELINE_START)%4===0){
-      tl.appendChild(el("div",{style:"position:absolute;left:"+gx+"px;bottom:0;transform:translateX("+(yr===LEASE_TIMELINE_START?"0":(yr===LEASE_TIMELINE_END?"-100%":"-50%"))+");font-size:9px;color:var(--faint)"},[String(yr)]));
-    }
+    tl.appendChild(el("div",{style:"position:absolute;left:"+gx+"px;bottom:0;transform:translateX("+(yr===LEASE_TIMELINE_START?"0":(yr===LEASE_TIMELINE_END?"-100%":"-50%"))+");font-size:9px;color:var(--faint)"},[String(yr).slice(-2)]));
   }
 
   function rebuildAfterDrag(){
@@ -1025,21 +1027,25 @@ function buildLeaseTimeline(container, bdef, bs, sc){
     var sp=document.getElementById("ss-site-panel");if(sp)buildSitePanel(sp);
   }
 
-  // Lease bars
+  // Lease bars, with the lease name as a row label to the LEFT of the bar
   bs.leases.forEach(function(lease, li){
     var def=LEASE_DEFS[li];
     var rowY=TL_TOP+li*TL_ROWH;
-    var label=el("div",{style:"flex:1;min-width:0;padding:0 6px;font-size:9px;font-weight:800;color:#fff;text-shadow:0 1px 1px rgba(0,0,0,.4);white-space:nowrap;overflow:hidden;pointer-events:none"},
-      [def.label+" · "+lease.start+"–"+lease.end]);
+    tl.appendChild(el("div",{style:[
+      "position:absolute","left:0","width:"+(LBL_W-8)+"px","top:"+rowY+"px","height:"+(TL_ROWH-6)+"px",
+      "display:flex","align-items:center","justify-content:flex-end",
+      "font-size:10px","font-weight:800","color:var(--ink)","text-align:right","pointer-events:none"
+    ].join(";")},[def.label]));
+
     var bar=el("div",{
       title:def.label+": "+lease.start+"–"+lease.end+" (drag edges to resize, middle to move)",
       style:[
         "position:absolute","left:"+yx(lease.start)+"px","top:"+rowY+"px",
         "width:"+Math.max(6,yx(lease.end)-yx(lease.start))+"px","height:"+(TL_ROWH-6)+"px",
         "background:"+def.color,"border:1px solid "+darkenColor(def.color,0.3),
-        "cursor:grab","box-sizing:border-box","display:flex","align-items:center"
+        "cursor:grab","box-sizing:border-box"
       ].join(";")
-    },[label]);
+    });
     var lh=el("div",{style:"position:absolute;left:-3px;top:0;bottom:0;width:7px;cursor:ew-resize"});
     var rh=el("div",{style:"position:absolute;right:-3px;top:0;bottom:0;width:7px;cursor:ew-resize"});
     bar.appendChild(lh); bar.appendChild(rh);
@@ -1048,7 +1054,6 @@ function buildLeaseTimeline(container, bdef, bs, sc){
       bar.style.left=yx(lease.start)+"px";
       bar.style.width=Math.max(6,yx(lease.end)-yx(lease.start))+"px";
       bar.title=def.label+": "+lease.start+"–"+lease.end+" (drag edges to resize, middle to move)";
-      label.textContent=def.label+" · "+lease.start+"–"+lease.end;
     }
     function dragHandler(mode){
       return function(e){
@@ -1056,7 +1061,7 @@ function buildLeaseTimeline(container, bdef, bs, sc){
         var startLease={start:lease.start,end:lease.end};
         var startX=e.clientX;
         function onMove(ev){
-          var dxYears=Math.round(((ev.clientX-startX)/TL_W)*span);
+          var dxYears=Math.round(((ev.clientX-startX)/TIMELINE_W)*span);
           if(mode==="move"){
             var dur=startLease.end-startLease.start;
             var ns=Math.max(LEASE_TIMELINE_START,Math.min(LEASE_TIMELINE_END-dur, startLease.start+dxYears));
@@ -1094,7 +1099,7 @@ function buildLeaseTimeline(container, bdef, bs, sc){
     e.stopPropagation();e.preventDefault();
     var startX=e.clientX, startYear=sc.currentYear;
     function onMove(ev){
-      var dxYears=Math.round(((ev.clientX-startX)/TL_W)*span);
+      var dxYears=Math.round(((ev.clientX-startX)/TIMELINE_W)*span);
       sc.currentYear=Math.max(LEASE_TIMELINE_START,Math.min(LEASE_TIMELINE_END,startYear+dxYears));
       var nx=yx(sc.currentYear);
       curLine.style.left=nx+"px"; curFlag.style.left=nx+"px"; curFlag.textContent=String(sc.currentYear);
@@ -1110,8 +1115,7 @@ function buildLeaseTimeline(container, bdef, bs, sc){
   tl.appendChild(curLine);
   tl.appendChild(curFlag);
 
-  tlOuter.appendChild(tl);
-  wrap.appendChild(tlOuter);
+  wrap.appendChild(tl);
   container.appendChild(wrap);
 }
 
