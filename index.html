@@ -217,8 +217,8 @@ var S = {
  },
  // DGSF → GSF building grossing, per program category (controlled here, used on the Program tab)
  grossing:{
-   gec:{v:1.25, label:"General Exam Clinic", note:"Clinic modules stack efficiently and share lobbies / vertical circulation — moderate building grossing."},
-   dnt:{v:1.20, label:"Diagnostic & Treatment", note:"Per the D&T KPU planning sheet (×1.2 multiplier) — large-floor-plate departments already carry support area within DGSF."},
+   gec:{v:1.2, label:"General Exam Clinic", note:"Clinic modules stack efficiently and share lobbies / vertical circulation — moderate building grossing."},
+   dnt:{v:1.25, label:"Diagnostic & Treatment", note:"Per the D&T KPU planning sheet (×1.2 multiplier) — large-floor-plate departments already carry support area within DGSF."},
    adm:{v:1.15, label:"Administrative Office", note:"Lowest intensity — lean building services, office-type core factor."}
  },
  buildings:[
@@ -276,7 +276,7 @@ var S = {
      dgsf_factor:{v:1.20, label:"NSF → DGSF (dept grossing)"}
    },
    rooms:[
-     {name:"Private Office",            qty:30,  size:120, kpu:false, color:"AD-off",  notes:"Directors & above"},
+     {name:"Private Office",            qty:30,  size:80,  kpu:false, color:"AD-off",  notes:"Directors & above"},
      {name:"Open Workstation",          qty:130, size:64,  kpu:false, color:"AD-open", notes:"8×8 benching"},
      {name:"Conference Room — large (16p)", qty:2, size:400, kpu:false, color:"AD-sup", notes:""},
      {name:"Conference Room — medium (10p)",qty:4, size:250, kpu:false, color:"AD-sup", notes:""},
@@ -336,7 +336,7 @@ var TABS = [
   {id:"program",     label:"Program"},
   {id:"scenarios",   label:"Site Scenarios"}
 ];
-var state = {tab:"program"};
+var state = {tab:"assumptions"};
 
 // ====================================================================
 // Helpers
@@ -600,7 +600,7 @@ function catKpiRow(cat){
     w.appendChild(kcard("Annual visits", fmt(m.annual), true));
   } else if(cat.id==="dnt"){
     w.appendChild(kcard("DGSF", fmt(m.dgsf)));
-    w.appendChild(kcard("GSF (×1.2)", fmt(m.gsf)));
+    w.appendChild(kcard("GSF (×"+bldgGrossing(cat).toFixed(2)+")", fmt(m.gsf)));
     w.appendChild(kcard("Amb. visits / day", fmt(m.ambDaily)));
     w.appendChild(kcard("Annual amb. visits", fmt(m.ambAnnual), true));
     w.appendChild(kcard("OR cases / day", f1(m.orDaily)));
