@@ -246,43 +246,6 @@ var S = {
  ],
  program:[
   {
-   id:"gec", name:"General Exam Clinic", color:"#96EBF6",
-   note:"Model program per BIDMC Chestnut Square Outpatient Practice (M. Hinchcliffe email 2026-07-17): 6,546 NSF × 1.53 departmental grossing ≈ the 10,000 DGSF clinic module. DGSF → GSF is set on the Project Assumptions tab. Exam-type rooms flagged “KPU” drive the visit throughput math.",
-   drivers:{
-     visit_min:{v:30, label:"Avg visit (min)"},
-     hours_day:{v:10, label:"Open hours / day"},
-     days_week:{v:6,  label:"Days / week"},
-     util:{v:0.85,   label:"Room utilization", pct:true},
-     dgsf_factor:{v:1.53, label:"NSF → DGSF (dept grossing)"}
-   },
-   rooms:[
-     {name:"Examination Room — standard",     qty:16, size:100, kpu:true,  color:"OP-main", notes:""},
-     {name:"Exam — minor procedure",          qty:2,  size:140, kpu:true,  color:"OP-main", notes:""},
-     {name:"Exam — patient of size",          qty:1,  size:200, kpu:true,  color:"OP-main", notes:""},
-     {name:"Consultation Room",               qty:2,  size:100, kpu:false, color:"OP-alt",  notes:""},
-     {name:"Waiting Room",                    qty:1,  size:580, kpu:false, color:"PB-wait", notes:""},
-     {name:"Check-in / Check-out",            qty:1,  size:246, kpu:false, color:"PB-wait", notes:""},
-     {name:"Vitals Area",                     qty:2,  size:80,  kpu:false, color:"OP-sup",  notes:""},
-     {name:"Patient Toilet",                  qty:6,  size:60,  kpu:false, color:"IP-toil", notes:""},
-     {name:"Patient Toilet — patient of size",qty:1,  size:80,  kpu:false, color:"IP-toil", notes:""},
-     {name:"Nursing Station",                 qty:1,  size:140, kpu:false, color:"OP-sup",  notes:""},
-     {name:"Medical Assistant",               qty:4,  size:35,  kpu:false, color:"OP-sup",  notes:""},
-     {name:"Medication Control Area",         qty:1,  size:80,  kpu:false, color:"OP-sup",  notes:""},
-     {name:"Clean Supply",                    qty:1,  size:100, kpu:false, color:"OP-sup",  notes:""},
-     {name:"Soiled Utility",                  qty:1,  size:100, kpu:false, color:"OP-sup",  notes:""},
-     {name:"Equipment Storage",               qty:1,  size:100, kpu:false, color:"SU-bldg", notes:""},
-     {name:"Wheelchair Alcove",               qty:2,  size:30,  kpu:false, color:"SU-bldg", notes:""},
-     {name:"Environmental Services",          qty:1,  size:50,  kpu:false, color:"SU-bldg", notes:""},
-     {name:"Office",                          qty:3,  size:80,  kpu:false, color:"AD-off",  notes:""},
-     {name:"Shared Work Area",                qty:5,  size:175, kpu:false, color:"AD-open", notes:""},
-     {name:"Break Room & Lockers",            qty:1,  size:250, kpu:false, color:"AD-sup",  notes:""},
-     {name:"Office Supplies",                 qty:1,  size:80,  kpu:false, color:"AD-sup",  notes:""},
-     {name:"Conference / Interview Room",     qty:1,  size:250, kpu:false, color:"AD-sup",  notes:""},
-     {name:"Tele-med / Huddle / Dictation",   qty:3,  size:65,  kpu:false, color:"AD-open", notes:""},
-     {name:"Staff Toilet",                    qty:3,  size:60,  kpu:false, color:"AD-sup",  notes:""}
-   ]
-  },
-  {
    id:"dnt", name:"Diagnostic & Treatment", color:"#B6CDEF", kpuMode:true,
    note:"KPU planning module per “D&T OR Ambulatory Program” — DGSF per Key Planning Unit, ×1.2 multiplier to GSF. Imaging assumes a generic mix of large fixed-bore and smaller / portable modalities (x-ray, ultrasound, mammography).",
    drivers:{
@@ -326,6 +289,43 @@ var S = {
      {name:"IT / Server Room",          qty:1,   size:150, kpu:false, color:"SU-bldg", notes:""},
      {name:"Wellness / Lactation",      qty:2,   size:100, kpu:false, color:"AD-sup",  notes:""},
      {name:"Staff Toilet",              qty:4,   size:60,  kpu:false, color:"SU-bldg", notes:""}
+   ]
+  },
+  {
+   id:"gec", name:"General Exam Clinic", color:"#96EBF6",
+   note:"Model program per BIDMC Chestnut Square Outpatient Practice (M. Hinchcliffe email 2026-07-17): 6,546 NSF × 1.53 departmental grossing ≈ the 10,000 DGSF clinic module. DGSF → GSF is set on the Project Assumptions tab. Exam-type rooms flagged “KPU” drive the visit throughput math.",
+   drivers:{
+     visit_min:{v:30, label:"Avg visit (min)"},
+     hours_day:{v:10, label:"Open hours / day"},
+     days_week:{v:6,  label:"Days / week"},
+     util:{v:0.85,   label:"Room utilization", pct:true},
+     dgsf_factor:{v:1.53, label:"NSF → DGSF (dept grossing)"}
+   },
+   rooms:[
+     {name:"Examination Room — standard",     qty:16, size:100, kpu:true,  color:"OP-main", notes:""},
+     {name:"Exam — minor procedure",          qty:2,  size:140, kpu:true,  color:"OP-main", notes:""},
+     {name:"Exam — patient of size",          qty:1,  size:200, kpu:true,  color:"OP-main", notes:""},
+     {name:"Consultation Room",               qty:2,  size:100, kpu:false, color:"OP-alt",  notes:""},
+     {name:"Waiting Room",                    qty:1,  size:580, kpu:false, color:"PB-wait", notes:""},
+     {name:"Check-in / Check-out",            qty:1,  size:246, kpu:false, color:"PB-wait", notes:""},
+     {name:"Vitals Area",                     qty:2,  size:80,  kpu:false, color:"OP-sup",  notes:""},
+     {name:"Patient Toilet",                  qty:6,  size:60,  kpu:false, color:"IP-toil", notes:""},
+     {name:"Patient Toilet — patient of size",qty:1,  size:80,  kpu:false, color:"IP-toil", notes:""},
+     {name:"Nursing Station",                 qty:1,  size:140, kpu:false, color:"OP-sup",  notes:""},
+     {name:"Medical Assistant",               qty:4,  size:35,  kpu:false, color:"OP-sup",  notes:""},
+     {name:"Medication Control Area",         qty:1,  size:80,  kpu:false, color:"OP-sup",  notes:""},
+     {name:"Clean Supply",                    qty:1,  size:100, kpu:false, color:"OP-sup",  notes:""},
+     {name:"Soiled Utility",                  qty:1,  size:100, kpu:false, color:"OP-sup",  notes:""},
+     {name:"Equipment Storage",               qty:1,  size:100, kpu:false, color:"SU-bldg", notes:""},
+     {name:"Wheelchair Alcove",               qty:2,  size:30,  kpu:false, color:"SU-bldg", notes:""},
+     {name:"Environmental Services",          qty:1,  size:50,  kpu:false, color:"SU-bldg", notes:""},
+     {name:"Office",                          qty:3,  size:80,  kpu:false, color:"AD-off",  notes:""},
+     {name:"Shared Work Area",                qty:5,  size:175, kpu:false, color:"AD-open", notes:""},
+     {name:"Break Room & Lockers",            qty:1,  size:250, kpu:false, color:"AD-sup",  notes:""},
+     {name:"Office Supplies",                 qty:1,  size:80,  kpu:false, color:"AD-sup",  notes:""},
+     {name:"Conference / Interview Room",     qty:1,  size:250, kpu:false, color:"AD-sup",  notes:""},
+     {name:"Tele-med / Huddle / Dictation",   qty:3,  size:65,  kpu:false, color:"AD-open", notes:""},
+     {name:"Staff Toilet",                    qty:3,  size:60,  kpu:false, color:"AD-sup",  notes:""}
    ]
   }
  ]
@@ -464,7 +464,6 @@ function tabAssumptions(){
   var grid = el("div",{style:"display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px;margin-top:10px"});
   ["plan_scale_ft_per_inch","plan_units_per_inch","gsf_round"].forEach(function(k){ grid.appendChild(assumptionField(k)); });
   mb.appendChild(grid);
-  v.appendChild(mb);
 
   // DGSF → GSF building grossing, per program category
   var gb = el("div",{class:"box",style:"margin-bottom:22px"});
@@ -473,7 +472,7 @@ function tabAssumptions(){
     "Departmental gross (DGSF) to building gross (GSF): covers shared lobbies, vertical circulation, mechanical, and exterior walls. Set per category because program intensities differ; the Program tab reads these values."
   ]));
   var gg = el("div",{style:"display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px"});
-  ["gec","dnt","adm"].forEach(function(k){
+  ["dnt","adm","gec"].forEach(function(k){
     var a = S.grossing[k];
     var f = el("div",{class:"field"});
     f.appendChild(el("label",null,[a.label]));
@@ -487,10 +486,9 @@ function tabAssumptions(){
     gg.appendChild(f);
   });
   gb.appendChild(gg);
-  v.appendChild(gb);
 
   // Site viz + buildings table side by side
-  var sect = el("div",{style:"display:grid;grid-template-columns:1.35fr 1fr;gap:22px;align-items:start"});
+  var sect = el("div",{style:"display:grid;grid-template-columns:1.35fr 1fr;gap:22px;align-items:start;margin-bottom:22px"});
 
   var viz = el("div");
   viz.appendChild(el("h2",null,["Site Overview"]));
@@ -540,6 +538,8 @@ function tabAssumptions(){
   ]));
   sect.appendChild(tb);
   v.appendChild(sect);
+  v.appendChild(gb);
+  v.appendChild(mb);
   return v;
 }
 

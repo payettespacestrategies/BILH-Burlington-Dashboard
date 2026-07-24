@@ -86,6 +86,11 @@ function ssLeaseActiveBits(bs){
   });
 }
 function ssLeaseKey(bits){ return (bits||[]).map(function(b){return b?"1":"0";}).join(""); }
+function ssFmtYQ(v){
+  var y=Math.floor(v+1e-6);
+  var q=Math.round((v-y)*4)+1;
+  return y+" Q"+q;
+}
 
 // ── Small helpers ───────────────────────────────────────────────────────
 function f2(n){ return Number(n).toFixed(2); }
@@ -665,6 +670,7 @@ function ssNewScenario(name){
       };
     }),
     currentYear: LEASE_TIMELINE_START,
+    timelineEnd: LEASE_TIMELINE_END,
     blocks: ssDefaultBlocks()
   };
 }
@@ -681,7 +687,8 @@ var SS = {
 function ssNormalizeScenario(sc){
   if(!Array.isArray(sc.blocks)||!sc.blocks.length) sc.blocks=ssDefaultBlocks();
   if(sc.currentYear===undefined) sc.currentYear=LEASE_TIMELINE_START;
-  sc.currentYear=Math.max(LEASE_TIMELINE_START,Math.min(LEASE_TIMELINE_END,sc.currentYear));
+  if(sc.timelineEnd===undefined) sc.timelineEnd=LEASE_TIMELINE_END;
+  sc.currentYear=Math.max(LEASE_TIMELINE_START,Math.min(sc.timelineEnd,sc.currentYear));
   var byId={};
   (sc.buildings||[]).forEach(function(bs){ byId[bs.id]=bs; });
   sc.buildings=S.buildings.map(function(b){
@@ -807,9 +814,7 @@ function buildBlocksPanel(container){
   container.innerHTML="";
   var sc=ssScenario();
 
-  container.appendChild(el("h3",null,["Program Blocks"]));
-  container.appendChild(el("div",{class:"hint",style:"margin:0 0 12px"},
-    ["Each block is the sum of a whole program category in GSF (NSF × dept grossing × building grossing, live from the Program tab). Add blocks and scale each one by a factor — e.g. an extra Admin block at ×0.5 = half the office program. Drag a block onto a floor level."]));
+  container.appendChild(el("h3",{style:"margin:0 0 10px"},["Program Blocks"]));
 
   S.program.forEach(function(cat){
     var m=catMetrics(cat);
@@ -982,78 +987,102 @@ function buildBlocksPanel(container){
 
 // ====================================================================
 // LEASE TIMELINE — 67 South Bedford only. Three colored lease zones are
-// baked into that building's plan SVGs; each lease bar's start/end year
-// (draggable) and the shared current-year marker (also draggable) decide
-// whether that zone is still blocked or has opened up for program. Changes
-// trigger a full rebuild, whose fill recompute (ssComputeAllFills) already
-// re-seeds displaced blocks nearby or evicts them back to the panel if
-// nothing fits anywhere on the floor.
+// baked into that building's plan SVGs; each lease bar's start/end
+// (draggable in quarter-year steps) and the shared current-time marker
+// decide whether that zone is still blocked or has opened for program.
+// The timeline's end year is editable (top right). Changes trigger a
+// full rebuild; displaced blocks re-seed nearby or return to the panel.
 // ====================================================================
 function buildLeaseTimeline(container, bdef, bs, sc){
   if(!ssHasLeases(bdef.id)) return;
   if(!bs.leases) bs.leases=ssDefaultLeases();
   if(sc.currentYear===undefined) sc.currentYear=LEASE_TIMELINE_START;
+  if(sc.timelineEnd===undefined) sc.timelineEnd=LEASE_TIMELINE_END;
+  var tlEnd=sc.timelineEnd;
 
-  var wrap=el("div",{class:"box",style:"padding:10px 14px;margin-bottom:12px"});
-  var hdrRow=el("div",{style:"display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px"});
-  hdrRow.appendChild(el("h3",{style:"margin:0"},["Lease Timeline"]));
-  hdrRow.appendChild(el("span",{class:"hint",style:"margin:0"},
-    ["Drag a lease's edges to resize it, its middle to move it, or the flag to change the current year — a lease's floor area is blocked until it ends, then opens up for program."]));
-  wrap.appendChild(hdrRow);
-
-  var LBL_W=54;   // left label column ("Lease 1" / "Year")
-  var TL_W=Math.max(380, (container.clientWidth||700)-44);
-  var TIMELINE_W=TL_W-LBL_W;
-  var TL_ROWH=25, TL_TOP=6, TL_H=TL_TOP+TL_ROWH*LEASE_DEFS.length+18;
-  var span=LEASE_TIMELINE_END-LEASE_TIMELINE_START;
-  function yx(yr){ return LBL_W+(yr-LEASE_TIMELINE_START)/span*TIMELINE_W; }
-
-  var tl=el("div",{style:"position:relative;width:"+TL_W+"px;height:"+TL_H+"px;user-select:none"});
-
-  // "Year" row label, left column, aligned with the tick-label row
-  tl.appendChild(el("div",{style:"position:absolute;left:0;width:"+(LBL_W-8)+"px;bottom:0;font-size:9px;font-weight:800;color:var(--faint);text-align:right"},["Year"]));
-
-  // Year gridlines + labels — every year, abbreviated to 2 digits
-  for(var yr=LEASE_TIMELINE_START; yr<=LEASE_TIMELINE_END; yr++){
-    var gx=yx(yr);
-    tl.appendChild(el("div",{style:"position:absolute;left:"+gx+"px;top:"+TL_TOP+"px;bottom:14px;width:1px;background:var(--line)"}));
-    tl.appendChild(el("div",{style:"position:absolute;left:"+gx+"px;bottom:0;transform:translateX("+(yr===LEASE_TIMELINE_START?"0":(yr===LEASE_TIMELINE_END?"-100%":"-50%"))+");font-size:9px;color:var(--faint)"},[String(yr).slice(-2)]));
-  }
-
-  function rebuildAfterDrag(){
+  function rebuildAll(){
     ssTouch();
     var pp=document.getElementById("ss-prog-panel");if(pp)buildBlocksPanel(pp);
     buildBuildingPanel(container);
     var sp=document.getElementById("ss-site-panel");if(sp)buildSitePanel(sp);
   }
 
-  // Lease bars, with the lease name as a row label to the LEFT of the bar
+  var wrap=el("div",{class:"box",style:"padding:10px 14px;margin-bottom:12px"});
+  var hdrRow=el("div",{style:"display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px"});
+  hdrRow.appendChild(el("h3",{style:"margin:0"},["Lease Timeline"]));
+  // Editable timeline end year (top right)
+  var endWrap=el("div",{style:"margin-left:auto;display:flex;align-items:center;gap:6px;font-size:14px;font-weight:700;color:var(--ink)"});
+  endWrap.appendChild(el("span",null,["Timeline to"]));
+  var endInp=el("input",{type:"text",value:String(tlEnd),
+    title:"Last year shown on the timeline (e.g. 2035 or 2050)",
+    style:"width:58px;font-size:14px;font-weight:800;border:1px solid var(--line2);padding:2px 6px;text-align:center;font-family:inherit"});
+  endInp.addEventListener("change",function(){
+    var v=parseInt(endInp.value.replace(/[^0-9]/g,""),10);
+    if(isNaN(v)){ endInp.value=String(sc.timelineEnd); return; }
+    if(v<100) v+=2000;
+    v=Math.max(LEASE_TIMELINE_START+1, Math.min(2075, v));
+    sc.timelineEnd=v;
+    bs.leases.forEach(function(l){
+      l.end=Math.min(l.end, v);
+      if(l.start>l.end-0.25) l.start=l.end-0.25;
+    });
+    sc.currentYear=Math.min(sc.currentYear, v);
+    rebuildAll();
+  });
+  endWrap.appendChild(endInp);
+  hdrRow.appendChild(endWrap);
+  wrap.appendChild(hdrRow);
+
+  var LBL_W=86;
+  var TL_W=Math.max(420,(container.clientWidth||700)-44);
+  var TIMELINE_W=TL_W-LBL_W;
+  var TL_ROWH=32, TL_TOP=30, TL_H=TL_TOP+TL_ROWH*LEASE_DEFS.length+28;
+  var span=tlEnd-LEASE_TIMELINE_START;
+  function yx(v){ return LBL_W+(v-LEASE_TIMELINE_START)/span*TIMELINE_W; }
+
+  var tl=el("div",{style:"position:relative;width:"+TL_W+"px;height:"+TL_H+"px;user-select:none"});
+
+  // "Year" axis label, bottom-left
+  tl.appendChild(el("div",{style:"position:absolute;left:0;width:"+(LBL_W-12)+"px;bottom:0;font-size:16px;font-weight:800;color:var(--mut);text-align:right"},["Year"]));
+
+  // Gridlines: light line every quarter, labeled line every year (2-digit)
+  for(var q=0;q<=span*4+1e-9;q++){
+    var v=LEASE_TIMELINE_START+q/4;
+    var isYear=(q%4===0);
+    var gx=yx(v);
+    tl.appendChild(el("div",{style:"position:absolute;left:"+gx+"px;top:"+TL_TOP+"px;bottom:26px;width:1px;background:"+(isYear?"var(--line2)":"var(--line)")}));
+    if(isYear){
+      tl.appendChild(el("div",{style:"position:absolute;left:"+gx+"px;bottom:0;transform:translateX("+(v===LEASE_TIMELINE_START?"0":(v===tlEnd?"-100%":"-50%"))+");font-size:16px;font-weight:700;color:var(--mut)"},[String(Math.round(v)).slice(-2)]));
+    }
+  }
+
+  // Lease bars — names as row labels to the LEFT, quarter-step dragging
   bs.leases.forEach(function(lease, li){
     var def=LEASE_DEFS[li];
     var rowY=TL_TOP+li*TL_ROWH;
     tl.appendChild(el("div",{style:[
-      "position:absolute","left:0","width:"+(LBL_W-8)+"px","top:"+rowY+"px","height:"+(TL_ROWH-6)+"px",
+      "position:absolute","left:0","width:"+(LBL_W-12)+"px","top:"+rowY+"px","height:"+(TL_ROWH-8)+"px",
       "display:flex","align-items:center","justify-content:flex-end",
-      "font-size:10px","font-weight:800","color:var(--ink)","text-align:right","pointer-events:none"
+      "font-size:16px","font-weight:800","color:var(--ink)","pointer-events:none"
     ].join(";")},[def.label]));
 
     var bar=el("div",{
-      title:def.label+": "+lease.start+"–"+lease.end+" (drag edges to resize, middle to move)",
+      title:def.label+": "+ssFmtYQ(lease.start)+" – "+ssFmtYQ(lease.end)+" (drag edges to resize, middle to move — quarter steps)",
       style:[
         "position:absolute","left:"+yx(lease.start)+"px","top:"+rowY+"px",
-        "width:"+Math.max(6,yx(lease.end)-yx(lease.start))+"px","height:"+(TL_ROWH-6)+"px",
+        "width:"+Math.max(5,yx(lease.end)-yx(lease.start))+"px","height:"+(TL_ROWH-8)+"px",
         "background:"+def.color,"border:1px solid "+darkenColor(def.color,0.3),
         "cursor:grab","box-sizing:border-box"
       ].join(";")
     });
-    var lh=el("div",{style:"position:absolute;left:-3px;top:0;bottom:0;width:7px;cursor:ew-resize"});
-    var rh=el("div",{style:"position:absolute;right:-3px;top:0;bottom:0;width:7px;cursor:ew-resize"});
+    var lh=el("div",{style:"position:absolute;left:-4px;top:0;bottom:0;width:9px;cursor:ew-resize"});
+    var rh=el("div",{style:"position:absolute;right:-4px;top:0;bottom:0;width:9px;cursor:ew-resize"});
     bar.appendChild(lh); bar.appendChild(rh);
 
     function commit(){
       bar.style.left=yx(lease.start)+"px";
-      bar.style.width=Math.max(6,yx(lease.end)-yx(lease.start))+"px";
-      bar.title=def.label+": "+lease.start+"–"+lease.end+" (drag edges to resize, middle to move)";
+      bar.style.width=Math.max(5,yx(lease.end)-yx(lease.start))+"px";
+      bar.title=def.label+": "+ssFmtYQ(lease.start)+" – "+ssFmtYQ(lease.end)+" (drag edges to resize, middle to move — quarter steps)";
     }
     function dragHandler(mode){
       return function(e){
@@ -1061,22 +1090,22 @@ function buildLeaseTimeline(container, bdef, bs, sc){
         var startLease={start:lease.start,end:lease.end};
         var startX=e.clientX;
         function onMove(ev){
-          var dxYears=Math.round(((ev.clientX-startX)/TIMELINE_W)*span);
+          var dq=Math.round(((ev.clientX-startX)/TIMELINE_W)*span*4)/4;   // quarter-year steps
           if(mode==="move"){
             var dur=startLease.end-startLease.start;
-            var ns=Math.max(LEASE_TIMELINE_START,Math.min(LEASE_TIMELINE_END-dur, startLease.start+dxYears));
-            lease.start=ns; lease.end=ns+dur;
+            var ns=Math.max(LEASE_TIMELINE_START,Math.min(tlEnd-dur, startLease.start+dq));
+            lease.start=Math.round(ns*4)/4; lease.end=Math.round((ns+dur)*4)/4;
           } else if(mode==="left"){
-            lease.start=Math.max(LEASE_TIMELINE_START, Math.min(lease.end-1, startLease.start+dxYears));
+            lease.start=Math.round(Math.max(LEASE_TIMELINE_START, Math.min(lease.end-0.25, startLease.start+dq))*4)/4;
           } else {
-            lease.end=Math.min(LEASE_TIMELINE_END, Math.max(lease.start+1, startLease.end+dxYears));
+            lease.end=Math.round(Math.min(tlEnd, Math.max(lease.start+0.25, startLease.end+dq))*4)/4;
           }
           commit();
         }
         function onUp(){
           document.removeEventListener("mousemove",onMove);
           document.removeEventListener("mouseup",onUp);
-          rebuildAfterDrag();
+          rebuildAll();
         }
         document.addEventListener("mousemove",onMove);
         document.addEventListener("mouseup",onUp);
@@ -1088,26 +1117,26 @@ function buildLeaseTimeline(container, bdef, bs, sc){
     tl.appendChild(bar);
   });
 
-  // Current-year marker (shared "now" line + draggable flag)
+  // Current-time marker (shared line + draggable flag, quarter steps)
   var cyx=yx(sc.currentYear);
-  var curLine=el("div",{style:"position:absolute;left:"+cyx+"px;top:"+TL_TOP+"px;bottom:14px;width:2px;background:#233044;z-index:5;pointer-events:none"});
+  var curLine=el("div",{style:"position:absolute;left:"+cyx+"px;top:"+(TL_TOP-4)+"px;bottom:26px;width:2px;background:#233044;z-index:5;pointer-events:none"});
   var curFlag=el("div",{
-    title:"Drag to set the current year",
-    style:"position:absolute;left:"+cyx+"px;top:0;transform:translateX(-50%);background:#233044;color:#fff;font-size:10px;font-weight:800;padding:1px 6px;border-radius:3px;cursor:ew-resize;white-space:nowrap;z-index:6"
-  },[String(sc.currentYear)]);
+    title:"Drag to set the current time (quarter steps)",
+    style:"position:absolute;left:"+cyx+"px;top:0;transform:translateX(-50%);background:#233044;color:#fff;font-size:13px;font-weight:800;padding:2px 8px;border-radius:3px;cursor:ew-resize;white-space:nowrap;z-index:6"
+  },[ssFmtYQ(sc.currentYear)]);
   curFlag.addEventListener("mousedown",function(e){
     e.stopPropagation();e.preventDefault();
     var startX=e.clientX, startYear=sc.currentYear;
     function onMove(ev){
-      var dxYears=Math.round(((ev.clientX-startX)/TIMELINE_W)*span);
-      sc.currentYear=Math.max(LEASE_TIMELINE_START,Math.min(LEASE_TIMELINE_END,startYear+dxYears));
+      var dq=Math.round(((ev.clientX-startX)/TIMELINE_W)*span*4)/4;
+      sc.currentYear=Math.round(Math.max(LEASE_TIMELINE_START,Math.min(tlEnd,startYear+dq))*4)/4;
       var nx=yx(sc.currentYear);
-      curLine.style.left=nx+"px"; curFlag.style.left=nx+"px"; curFlag.textContent=String(sc.currentYear);
+      curLine.style.left=nx+"px"; curFlag.style.left=nx+"px"; curFlag.textContent=ssFmtYQ(sc.currentYear);
     }
     function onUp(){
       document.removeEventListener("mousemove",onMove);
       document.removeEventListener("mouseup",onUp);
-      rebuildAfterDrag();
+      rebuildAll();
     }
     document.addEventListener("mousemove",onMove);
     document.addEventListener("mouseup",onUp);
@@ -1145,8 +1174,7 @@ function buildBuildingPanel(container){
   var gridFt=ssGridFt(bdef);
 
   var legendRow=el("div",{style:"display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap"});
-  legendRow.appendChild(el("div",{class:"hint",style:"margin:0;flex:1;min-width:200px"},
-    [gridFt+"′ canvas · grid = "+SS_GRID_DIV+"′ · scroll or +/− to zoom · dropped blocks auto-fill the usable floor area keeping their GSF ("+SS_MASK_FT+"′ cells) · grey = unusable · drag a placed block to re-flow it · double-click (or hover ×) to remove"]));
+  legendRow.appendChild(el("div",{style:"flex:1"}));
   // Section draw toggle
   if(!SS._sectionDrawMode) SS._sectionDrawMode=false;
   legendRow.appendChild(el("button",{
