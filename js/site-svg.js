@@ -138,7 +138,7 @@ var SITE_SVG_INLINE=`<svg id="site-svg-base" xmlns="http://www.w3.org/2000/svg" 
       }
 
       .sp-cls-18 {
-        fill: #fff;
+        fill: #ed3ebc;
       }
 
       .sp-cls-38 {

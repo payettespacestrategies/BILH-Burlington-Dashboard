@@ -1915,14 +1915,18 @@ function buildSitePanel(container){
     var meta=SS_SITE_META[b.id];
     if(!meta) return;
     var active=(bi===SS.activeBuilding);
+    // Outline-only highlight: the plan's own building color shows through
+    // (no extra tint); the active building gets a dark outline.
     var poly=document.createElementNS(svgNS,"polygon");
     poly.setAttribute("points",meta.footprint);
-    poly.setAttribute("fill",meta.color);
-    poly.setAttribute("fill-opacity",active?"0.8":"0.45");
-    poly.setAttribute("stroke",active?"#233044":darkenColor(meta.color,0.4));
-    poly.setAttribute("stroke-width",active?"4":"1.5");
-    poly.style.pointerEvents="auto";
+    poly.setAttribute("fill","#fff");
+    poly.setAttribute("fill-opacity","0");
+    poly.setAttribute("stroke","#233044");
+    poly.setAttribute("stroke-width",active?"5":"0");
+    poly.style.pointerEvents="fill";
     poly.style.cursor="pointer";
+    poly.addEventListener("mouseenter",function(){ if(!active) poly.setAttribute("stroke-width","3"); });
+    poly.addEventListener("mouseleave",function(){ if(!active) poly.setAttribute("stroke-width","0"); });
     poly.addEventListener("click",function(){
       SS.activeBuilding=bi;
       var bp=document.getElementById("ss-bldg-panel");if(bp)buildBuildingPanel(bp);

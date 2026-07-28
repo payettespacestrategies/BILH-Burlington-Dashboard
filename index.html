@@ -495,14 +495,6 @@ function tabAssumptions(){
   var sw = el("div",{class:"sitewrap",id:"siteviz"});
   sw.innerHTML = document.getElementById("site-svg-src").innerHTML;
   viz.appendChild(sw);
-  var lg = el("div",{class:"legend"});
-  [["#3CA09E","Study buildings — Stilts · 31 Burlington Mall Rd · 67 South Bedford St"],
-   ["#FEB522","Trump Site"],
-   ["#B4B7BD","Parking structure"],
-   ["#CDCFD4","Other buildings (excluded)"]].forEach(function(p){
-    lg.appendChild(el("span",null,[el("span",{class:"sw",style:"background:"+p[0]}),p[1]]));
-  });
-  viz.appendChild(lg);
   sect.appendChild(viz);
 
   var tb = el("div");
@@ -5799,7 +5791,7 @@ else { render(); }
       }
 
       .ax-cls-2195 {
-        fill: #3ca09e;
+        fill: #ed3ebc;
       }
 
       .ax-cls-1244 {
