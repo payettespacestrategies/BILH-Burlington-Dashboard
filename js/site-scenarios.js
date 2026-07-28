@@ -1164,7 +1164,7 @@ function buildBuildingPanel(container){
       class:"seg sm",
       style:bi===SS.activeBuilding?"background:var(--ink);color:#fff":"",
       onclick:function(){SS.activeBuilding=bi;buildBuildingPanel(container);var sp=document.getElementById("ss-site-panel");if(sp)buildSitePanel(sp);}
-    },[el("span",{class:"dot",style:"background:"+(meta.color||"#ccc")}), b.name]));
+    },[b.name]));
   });
   container.appendChild(hdr);
 
