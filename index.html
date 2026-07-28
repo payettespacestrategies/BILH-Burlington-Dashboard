@@ -779,7 +779,10 @@ function render(){
   else if(state.tab==="program") view.appendChild(tabProgram());
   else view.appendChild(tabScenarios());
 }
-render();
+// Defer the first render until the whole document is parsed — the
+// Assumptions tab clones #site-svg-src, which sits below this script.
+if(document.readyState==="loading"){ document.addEventListener("DOMContentLoaded", render); }
+else { render(); }
 </script>
 
 <!-- Site 3D SVG source (hidden; cloned into the Assumptions tab) -->
